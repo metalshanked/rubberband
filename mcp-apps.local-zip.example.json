@@ -1,0 +1,37 @@
+{
+  "apps": [
+    {
+      "id": "dashbuilder",
+      "name": "Elastic Dashbuilder",
+      "description": "Dashbuilder installed from a zip copied into the Docker build context.",
+      "source": {
+        "type": "zip",
+        "path": "./vendor/example-mcp-dashbuilder.zip",
+        "stripTopLevel": true
+      },
+      "install": [
+        ["npm", "install"],
+        ["npm", "run", "build"]
+      ],
+      "transport": {
+        "type": "stdio",
+        "command": "npm",
+        "args": ["run", "start"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
+        "ELASTICSEARCH_URL",
+        "ELASTICSEARCH_CLOUD_ID",
+        "ELASTICSEARCH_API_KEY",
+        "ELASTICSEARCH_USERNAME",
+        "ELASTICSEARCH_PASSWORD",
+        "ELASTIC_CCS_SEARCH_BY_DEFAULT",
+        "ELASTIC_CCS_INDEX_PATTERNS",
+        "ELASTIC_CCS_RESOLVE_TIMEOUT_MS",
+        "KIBANA_URL",
+        "KIBANA_SPACE_ID",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    }
+  ]
+}

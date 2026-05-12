@@ -1,0 +1,65 @@
+{
+  "name": "rubberband-mcp-chat",
+  "version": "0.1.0",
+  "description": "A web chat host for analytics and visualization MCP Apps.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "analytics",
+    "visualization",
+    "chat",
+    "react",
+    "typescript"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite --host 0.0.0.0",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/index.js",
+    "check": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && npm run test:api && npm run test:e2e",
+    "test:api": "tsx --test tests/api/smoke.test.ts",
+    "test:e2e": "playwright test",
+    "test:docker": "node scripts/docker-smoke.mjs",
+    "test:live": "npm run build && node scripts/live-chat-smoke.mjs",
+    "mcp:install": "node scripts/install-mcp-apps.mjs"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.45",
+    "@langchain/openai": "^1.4.5",
+    "@mcp-ui/client": "^7.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "deepagents": "^1.10.0",
+    "docx": "^9.6.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "html-to-image": "^1.11.13",
+    "jspdf": "^4.2.1",
+    "jszip": "^3.10.1",
+    "langchain": "^1.4.0",
+    "lucide-react": "^0.562.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.3",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.11"
+  }
+}

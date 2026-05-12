@@ -1,0 +1,21 @@
+{
+  "apps": [
+    {
+      "id": "fixture-observability",
+      "name": "Fixture Observability",
+      "description": "Fixture app with skill guidance.",
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["-e", "process.exit(0)"]
+      },
+      "skills": [
+        {
+          "name": "apm-health-summary",
+          "description": "Use first for vague health investigations.",
+          "content": "Call apm-health-summary before drilling into dependencies. Respect data coverage and ask for disambiguation instead of guessing."
+        }
+      ]
+    }
+  ]
+}

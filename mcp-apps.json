@@ -1,0 +1,190 @@
+{
+  "apps": [
+    {
+      "id": "dashbuilder",
+      "name": "Elastic Dashbuilder",
+      "description": "Build, preview, import, and export Kibana dashboards with MCP Apps.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/elastic/example-mcp-dashbuilder.git",
+        "ref": "21ce3b2a57327614aebc9f2ca55ffe371d0df0ed"
+      },
+      "install": [
+        ["npm", "install"],
+        ["npm", "run", "build"]
+      ],
+      "transport": {
+        "type": "stdio",
+        "command": "npm",
+        "args": ["run", "start"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
+        "ELASTICSEARCH_URL",
+        "ELASTICSEARCH_CLOUD_ID",
+        "ELASTICSEARCH_API_KEY",
+        "ELASTICSEARCH_USERNAME",
+        "ELASTICSEARCH_PASSWORD",
+        "ELASTIC_CCS_SEARCH_BY_DEFAULT",
+        "ELASTIC_CCS_INDEX_PATTERNS",
+        "ELASTIC_CCS_RESOLVE_TIMEOUT_MS",
+        "KIBANA_URL",
+        "KIBANA_SPACE_ID",
+        "KIBANA_API_KEY",
+        "KIBANA_USERNAME",
+        "KIBANA_PASSWORD",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    },
+    {
+      "id": "security",
+      "name": "Elastic Security",
+      "description": "Interactive SOC workflows for alerts, cases, rules, threat hunting, and sample ECS security data.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/elastic/example-mcp-app-security.git",
+        "ref": "86ddc3d743d41a8b42fa51d643d3befc83d99163"
+      },
+      "install": [
+        ["npm", "install"],
+        ["npm", "run", "build"]
+      ],
+      "transport": {
+        "type": "stdio",
+        "command": "npm",
+        "args": ["run", "start:stdio"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
+        "ELASTICSEARCH_URL",
+        "ELASTICSEARCH_CLOUD_ID",
+        "ELASTICSEARCH_API_KEY",
+        "ELASTICSEARCH_USERNAME",
+        "ELASTICSEARCH_PASSWORD",
+        "ELASTIC_CCS_SEARCH_BY_DEFAULT",
+        "ELASTIC_CCS_INDEX_PATTERNS",
+        "ELASTIC_CCS_RESOLVE_TIMEOUT_MS",
+        "CLUSTERS_JSON",
+        "CLUSTERS_FILE",
+        "KIBANA_URL",
+        "KIBANA_SPACE_ID",
+        "KIBANA_API_KEY",
+        "KIBANA_USERNAME",
+        "KIBANA_PASSWORD",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    },
+    {
+      "id": "observability",
+      "name": "Elastic Observability",
+      "description": "Interactive SRE workflows for observability, APM, Kubernetes, ML anomalies, and alert rules.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/elastic/example-mcp-app-observability.git",
+        "ref": "a8799b7149d483f82c8792fbe6c457ce85a2702e"
+      },
+      "install": [
+        ["npm", "install"],
+        ["npm", "run", "build"]
+      ],
+      "transport": {
+        "type": "stdio",
+        "command": "npm",
+        "args": ["run", "start:stdio"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
+        "ELASTICSEARCH_URL",
+        "ELASTICSEARCH_CLOUD_ID",
+        "ELASTICSEARCH_API_KEY",
+        "ELASTICSEARCH_USERNAME",
+        "ELASTICSEARCH_PASSWORD",
+        "ELASTIC_CCS_SEARCH_BY_DEFAULT",
+        "ELASTIC_CCS_INDEX_PATTERNS",
+        "ELASTIC_CCS_RESOLVE_TIMEOUT_MS",
+        "CLUSTERS_JSON",
+        "CLUSTERS_FILE",
+        "KIBANA_URL",
+        "KIBANA_SPACE_ID",
+        "KIBANA_API_KEY",
+        "KIBANA_USERNAME",
+        "KIBANA_PASSWORD",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    },
+    {
+      "id": "mcp-app-trino",
+      "name": "Trino Visualization",
+      "description": "Query Trino or Starburst and render MCP App previews with Elastic Charts.",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/metalshanked/mcp-app-trino.git",
+        "ref": "c46dcf94772ca7b4a1ab41e0b0b8fc52e83999e4"
+      },
+      "install": [
+        ["npm", "install"],
+        ["npm", "run", "build"]
+      ],
+      "transport": {
+        "type": "stdio",
+        "command": "npm",
+        "args": ["run", "start:stdio"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
+        "TRINO_HOST",
+        "TRINO_PORT",
+        "TRINO_SCHEME",
+        "TRINO_SSL",
+        "TRINO_USER",
+        "TRINO_PASSWORD",
+        "TRINO_ACCESS_TOKEN",
+        "TRINO_AUTH_TYPE",
+        "TRINO_CATALOG",
+        "TRINO_SCHEMA",
+        "TRINO_SOURCE",
+        "TRINO_INSECURE_TLS",
+        "TRINO_TLS_INSECURE",
+        "TRINO_CA_CERT",
+        "TRINO_CA_CERT_FILE",
+        "TRINO_TLS_CA_CERT",
+        "TRINO_TLS_CA_CERT_FILE",
+        "TRINO_CLIENT_CERT",
+        "TRINO_CLIENT_CERT_FILE",
+        "TRINO_CLIENT_KEY",
+        "TRINO_CLIENT_KEY_FILE",
+        "TRINO_CLIENT_KEY_PASSPHRASE",
+        "TRINO_TLS_CLIENT_CERT",
+        "TRINO_TLS_CLIENT_CERT_FILE",
+        "TRINO_TLS_CLIENT_KEY",
+        "TRINO_TLS_CLIENT_KEY_FILE",
+        "TRINO_TLS_CLIENT_KEY_PASSPHRASE",
+        "STARBURST_HOST",
+        "STARBURST_PORT",
+        "STARBURST_SCHEME",
+        "STARBURST_USER",
+        "STARBURST_PASSWORD",
+        "STARBURST_ACCESS_TOKEN",
+        "STARBURST_CATALOG",
+        "STARBURST_SCHEMA",
+        "STARBURST_INSECURE_TLS",
+        "STARBURST_TLS_INSECURE",
+        "STARBURST_CA_CERT",
+        "STARBURST_CA_CERT_FILE",
+        "STARBURST_TLS_CA_CERT",
+        "STARBURST_TLS_CA_CERT_FILE",
+        "STARBURST_CLIENT_CERT",
+        "STARBURST_CLIENT_CERT_FILE",
+        "STARBURST_CLIENT_KEY",
+        "STARBURST_CLIENT_KEY_FILE",
+        "STARBURST_CLIENT_KEY_PASSPHRASE",
+        "STARBURST_TLS_CLIENT_CERT",
+        "STARBURST_TLS_CLIENT_CERT_FILE",
+        "STARBURST_TLS_CLIENT_KEY",
+        "STARBURST_TLS_CLIENT_KEY_FILE",
+        "STARBURST_TLS_CLIENT_KEY_PASSPHRASE",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    }
+  ]
+}
