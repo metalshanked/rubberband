@@ -13,8 +13,8 @@ import { logger } from './logger.js';
 import type { ProgressEvent } from './progress.js';
 import { explainError, sanitizeErrorMessage } from './error-explainer.js';
 import { AnalyticsProfileService } from './analytics-profile-service.js';
-import { testExternalConnection } from './connection-tests.js';
-import { buildDemoPayload } from './demo.js';
+import { testExternalConnection, type ConnectionTestTarget } from './connection-tests.js';
+import { applyDemoConnectionChecks, buildDemoPlan } from './demo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '../..');
@@ -211,10 +211,12 @@ async function main() {
     try {
       const session = sessions.get(req, res);
       const body = demoBodySchema.parse(req.body || {});
-      session.progress.publish('Preparing live demo');
+      session.progress.publish('Checking live demo readiness');
       const apps = session.registry.listApps();
       const tools = await session.registry.listTools().catch(() => []);
-      res.json(buildDemoPayload(apps, tools as never, body.appIds || []));
+      const plan = buildDemoPlan(apps, tools as never, body.appIds || []);
+      const connectionChecks = plan.ok ? await runDemoConnectionChecks(session.settings, plan.requiredConnections) : [];
+      res.json(applyDemoConnectionChecks(plan, connectionChecks));
     } catch (error) {
       next(error);
     }
@@ -401,6 +403,12 @@ function createCandidateSettings(base: SettingsAccess, values: Record<string, un
 
 function isTruthy(value: string) {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+async function runDemoConnectionChecks(settings: SettingsAccess, targets: ConnectionTestTarget[]) {
+  const uniqueTargets = [...new Set(targets)];
+  if (!uniqueTargets.length) return [];
+  return Promise.all(uniqueTargets.map(target => testExternalConnection(settings, target)));
 }
 
 function readHttpStatus(error: unknown) {

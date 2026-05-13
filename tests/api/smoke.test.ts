@@ -24,6 +24,7 @@ import { buildTrinoProfile } from '../../src/server/trino-profiler.js';
 import { explainError, sanitizeErrorMessage } from '../../src/server/error-explainer.js';
 import { AnalyticsProfileService } from '../../src/server/analytics-profile-service.js';
 import { testExternalConnection } from '../../src/server/connection-tests.js';
+import { buildDemoPlan } from '../../src/server/demo.js';
 import {
   assertMcpToolCallAllowed,
   buildMcpReadOnlyPromptGuidance,
@@ -197,20 +198,43 @@ test('settings endpoint exposes read-only MCP safety controls', async () => {
   assert.equal(fields.get('ELASTICSEARCH_AUTO_CREATE_API_KEY')?.type, 'checkbox');
 });
 
-test('demo endpoint returns a local one-click demo payload', async () => {
+test('demo endpoint reports live demo readiness', async () => {
   const response = await fetch(`${baseUrl}/api/demo`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ appIds: [] })
   });
   assert.equal(response.status, 200);
-  const body = (await response.json()) as { content: string; followUps: string[]; toolCalls: unknown[]; sanity: { ok: boolean; availableApps: number } };
+  const body = (await response.json()) as { ok: boolean; status: string; prompts: unknown[]; checks: unknown[]; sanity: { ok: boolean; availableApps: number } };
 
-  assert.equal(body.sanity.ok, true);
+  assert.equal(body.ok, false);
+  assert.equal(body.status, 'needs_apps');
+  assert.equal(body.sanity.ok, false);
   assert.equal(body.sanity.availableApps, 0);
-  assert.match(body.content, /Rubberband Live Demo/);
-  assert.ok(body.followUps.length > 0);
-  assert.ok(body.toolCalls.length > 0);
+  assert.equal(body.prompts.length, 0);
+  assert.ok(body.checks.length > 0);
+});
+
+test('demo planner creates public live-data prompts for selected MCP apps', () => {
+  const plan = buildDemoPlan(
+    [
+      { id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' },
+      { id: 'mcp-app-trino', name: 'Trino Visualization', status: 'connected' }
+    ],
+    [
+      { appId: 'dashbuilder', appName: 'Elastic Dashbuilder', name: 'create_chart' },
+      { appId: 'mcp-app-trino', appName: 'Trino Visualization', name: 'visualize_query' }
+    ],
+    ['dashbuilder', 'mcp-app-trino']
+  );
+
+  assert.equal(plan.ok, true);
+  assert.equal(plan.status, 'ready');
+  assert.deepEqual(plan.appIds, ['dashbuilder', 'mcp-app-trino']);
+  assert.ok(plan.prompts.length >= 2);
+  assert.ok(plan.prompts.every(prompt => prompt.deepAnalysis));
+  assert.match(plan.prompts.map(prompt => prompt.prompt).join('\n'), /actual available data|actual queryable data/i);
+  assert.doesNotMatch(JSON.stringify(plan), /canned|fake|placeholder|internal/i);
 });
 
 test('settings connection test endpoint returns a structured result', async () => {

@@ -1,3 +1,5 @@
+import type { ConnectionTestResult, ConnectionTestTarget } from './connection-tests.js';
+
 type DemoApp = {
   id: string;
   name: string;
@@ -8,198 +10,249 @@ type DemoTool = {
   appId: string;
   appName?: string;
   name: string;
+  description?: string;
+  _meta?: {
+    ui?: {
+      resourceUri?: string;
+    };
+  };
 };
 
-type DemoToolCall = {
-  id: string;
-  appId: string;
-  toolName: string;
-  toolInput: Record<string, unknown>;
-  toolResult: unknown;
-  resourceUri?: string;
-  html?: string;
+export type DemoCheck = {
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type DemoPrompt = {
+  label: string;
+  prompt: string;
+  appIds: string[];
+  deepAnalysis: boolean;
+};
+
+export type DemoPlan = {
+  ok: boolean;
+  status: 'ready' | 'needs_apps' | 'needs_tools' | 'connection_failed';
   title: string;
+  summary: string;
+  checks: DemoCheck[];
+  prompts: DemoPrompt[];
+  selectedAppIds: string[];
+  appIds: string[];
+  requiredConnections: ConnectionTestTarget[];
+  sanity: {
+    ok: boolean;
+    selectedAppIds: string[];
+    availableApps: number;
+    availableTools: number;
+    demoApps: string[];
+  };
 };
 
-export function buildDemoPayload(apps: DemoApp[], tools: DemoTool[], selectedAppIds: string[] = []) {
-  const selected = selectedAppIds.length ? apps.filter(app => selectedAppIds.includes(app.id)) : apps;
-  const candidates = selected.length ? selected : apps;
-  const availableNames = candidates.map(app => app.name || app.id);
-  const appKinds = new Set(candidates.map(classifyApp));
-  const toolCalls: DemoToolCall[] = [];
-  const questions: string[] = [];
+type AppKind = 'elastic' | 'security' | 'observability' | 'trino' | 'starburst' | 'generic';
 
-  if (appKinds.has('elastic') || appKinds.has('security') || appKinds.has('observability')) {
-    questions.push(
-      'Show critical security activity over the last 24 hours and highlight the riskiest hosts.',
-      'Build an executive incident dashboard with severity, trend, and affected entities.',
-      'Find unusual authentication or endpoint activity and turn it into an investigation view.'
-    );
-    toolCalls.push(buildElasticDemo());
-  }
-
-  if (appKinds.has('trino')) {
-    questions.push(
-      'Map the most important Trino catalogs and show relationships between business domains.',
-      'Create a revenue and order quality dashboard from warehouse tables.',
-      'Find tables that look joinable and suggest a starter analytics query.'
-    );
-    toolCalls.push(buildTrinoDemo());
-  }
-
-  if (!toolCalls.length) {
-    questions.push(
-      'Discover available MCP apps and suggest the best first analytics workflow.',
-      'Create an example dashboard preview from the selected app capabilities.',
-      'Summarize what this Rubberband workspace can demonstrate safely.'
-    );
-    toolCalls.push(buildGenericDemo(candidates[0]));
-  }
-
-  if (toolCalls.length === 1 && tools.some(tool => !toolCalls.some(call => call.appId === tool.appId))) {
-    toolCalls.push(buildGenericDemo(candidates.find(app => app.id !== toolCalls[0].appId)));
-  }
+export function buildDemoPlan(apps: DemoApp[], tools: DemoTool[], selectedAppIds: string[] = []): DemoPlan {
+  const selected = selectedAppIds.length ? apps.filter(app => selectedAppIds.includes(app.id)) : apps.filter(app => app.status !== 'error');
+  const candidates = selected.length ? selected : apps.filter(app => app.status !== 'error');
+  const appIds = candidates.map(app => app.id);
+  const selectedTools = tools.filter(tool => !appIds.length || appIds.includes(tool.appId));
+  const previewTools = selectedTools.filter(isUsefulDemoTool);
+  const prompts = buildDemoPrompts(candidates, selectedTools);
+  const needsApps = candidates.length === 0;
+  const needsTools = !needsApps && selectedTools.length === 0;
+  const requiredConnections = needsApps || needsTools ? [] : inferRequiredConnections(candidates);
+  const ok = !needsApps && !needsTools && prompts.length > 0;
 
   return {
-    content: [
-      '# Rubberband Live Demo',
-      '',
-      `Sanity check: ${candidates.length ? `${candidates.length} selected or available app${candidates.length === 1 ? '' : 's'} detected` : 'LLM-only workspace detected'}.`,
-      availableNames.length ? `Apps in this demo: ${availableNames.join(', ')}.` : 'No MCP apps are currently selected; showing the generic Rubberband experience.',
-      '',
-      '## Canned Questions',
-      ...questions.slice(0, 6).map((question, index) => `${index + 1}. ${question}`),
-      '',
-      '## What To Show',
-      '- Interactive previews render directly in chat.',
-      '- Graph-style demos support pan and zoom from the preview controls.',
-      '- App-native graph interactions remain available inside MCP app previews.',
-      '- All demo content is local and read-only; it does not query external systems.'
-    ].join('\n'),
-    followUps: questions.slice(0, 4),
-    toolCalls,
+    ok,
+    status: needsApps ? 'needs_apps' : needsTools ? 'needs_tools' : 'ready',
+    title: ok ? 'Live demo ready' : needsApps ? 'Select an MCP app to run a live demo' : 'Live demo needs MCP tools',
+    summary: ok
+      ? `Ready to run a live data demo with ${formatList(candidates.map(app => app.name || app.id))}.`
+      : needsApps
+        ? 'No available MCP apps were found for a live demo.'
+        : 'The selected apps are available, but Rubberband could not discover tools for them.',
+    checks: [
+      {
+        label: 'MCP apps',
+        ok: candidates.length > 0,
+        detail: candidates.length ? `${candidates.length} app${candidates.length === 1 ? '' : 's'} ready` : 'No apps available'
+      },
+      {
+        label: 'MCP tools',
+        ok: selectedTools.length > 0,
+        detail: selectedTools.length ? `${selectedTools.length} exposed tool${selectedTools.length === 1 ? '' : 's'}` : 'No tools discovered'
+      },
+      {
+        label: 'Interactive previews',
+        ok: previewTools.length > 0,
+        detail: previewTools.length ? `${previewTools.length} likely visualization tool${previewTools.length === 1 ? '' : 's'}` : 'Will use the best available app tool'
+      }
+    ],
+    prompts,
+    selectedAppIds,
+    appIds,
+    requiredConnections,
     sanity: {
-      ok: true,
+      ok,
       selectedAppIds,
       availableApps: apps.length,
       availableTools: tools.length,
-      demoApps: candidates.map(app => app.id)
+      demoApps: appIds
     }
   };
 }
 
-function classifyApp(app: DemoApp) {
+export function applyDemoConnectionChecks(plan: DemoPlan, connectionChecks: ConnectionTestResult[]): DemoPlan {
+  if (!connectionChecks.length) return plan;
+  const checks = [
+    ...plan.checks,
+    ...connectionChecks.map(check => ({
+      label: check.label,
+      ok: check.ok,
+      detail: check.ok ? check.message : `Connection check failed: ${check.message}`
+    }))
+  ];
+  const failed = connectionChecks.filter(check => !check.ok);
+  if (!failed.length) {
+    return { ...plan, checks, sanity: { ...plan.sanity, ok: plan.ok } };
+  }
+
+  return {
+    ...plan,
+    ok: false,
+    status: 'connection_failed',
+    title: 'Live demo needs connection settings',
+    summary: `Rubberband found the selected apps, but ${formatList(failed.map(check => check.label))} did not pass the live connection check.`,
+    checks,
+    sanity: { ...plan.sanity, ok: false }
+  };
+}
+
+function buildDemoPrompts(apps: DemoApp[], tools: DemoTool[]): DemoPrompt[] {
+  const groups = groupAppsByKind(apps);
+  const prompts: DemoPrompt[] = [];
+
+  if (groups.security.length) {
+    prompts.push({
+      label: 'Security live triage',
+      appIds: groups.security.map(app => app.id),
+      deepAnalysis: true,
+      prompt: [
+        'Create a live, read-only security analytics demo using the selected Elastic Security MCP app.',
+        'Discover usable security data first, then generate the best interactive preview you can: severity trends, top affected hosts/users, and a short analyst takeaway.',
+        'Use actual available data and MCP app previews where possible. If the selected data source has no matching records, show the closest useful live security view instead.'
+      ].join('\n')
+    });
+  }
+
+  if (groups.observability.length) {
+    prompts.push({
+      label: 'Observability live view',
+      appIds: groups.observability.map(app => app.id),
+      deepAnalysis: true,
+      prompt: [
+        'Create a live, read-only observability demo using the selected Elastic Observability MCP app.',
+        'Find available logs, metrics, traces, or service data, then produce an interactive preview showing health, trend, and the most useful breakdown.',
+        'Use actual available data and keep the result concise enough to present live.'
+      ].join('\n')
+    });
+  }
+
+  if (groups.elastic.length) {
+    prompts.push({
+      label: 'Elastic dashboard',
+      appIds: groups.elastic.map(app => app.id),
+      deepAnalysis: true,
+      prompt: [
+        'Create a live, read-only Elastic analytics dashboard demo from the selected app.',
+        'First discover a suitable index, data view, or sample data source, then generate an interactive visualization preview with a time trend and top breakdowns.',
+        'Choose the most visually useful available data; do not invent values.'
+      ].join('\n')
+    });
+  }
+
+  const trinoApps = [...groups.trino, ...groups.starburst];
+  if (trinoApps.length) {
+    prompts.push({
+      label: 'Warehouse analytics',
+      appIds: trinoApps.map(app => app.id),
+      deepAnalysis: true,
+      prompt: [
+        'Create a live, read-only Trino or Starburst analytics demo from the selected MCP app.',
+        'Discover accessible catalogs and tables, pick a table or relationship that can produce a useful chart or graph, and generate an interactive visualization preview.',
+        'Use actual queryable data or metadata only, and keep the query bounded for a live demo.'
+      ].join('\n')
+    });
+  }
+
+  const usedAppIds = new Set(prompts.flatMap(prompt => prompt.appIds));
+  const genericApps = groups.generic.filter(app => !usedAppIds.has(app.id));
+  if (!prompts.length && genericApps.length) {
+    prompts.push({
+      label: 'MCP app preview',
+      appIds: genericApps.map(app => app.id),
+      deepAnalysis: true,
+      prompt: [
+        'Create a live, read-only Rubberband demo using the selected MCP app.',
+        'Discover what the app can safely show, then generate the best interactive preview or concise analysis available from live tools.',
+        'Do not invent data.'
+      ].join('\n')
+    });
+  }
+
+  return prompts
+    .map(prompt => ({ ...prompt, appIds: prompt.appIds.filter(appId => tools.some(tool => tool.appId === appId)) }))
+    .filter(prompt => prompt.appIds.length > 0)
+    .slice(0, 4);
+}
+
+function groupAppsByKind(apps: DemoApp[]) {
+  const groups: Record<AppKind, DemoApp[]> = {
+    elastic: [],
+    security: [],
+    observability: [],
+    trino: [],
+    starburst: [],
+    generic: []
+  };
+  for (const app of apps) groups[classifyApp(app)].push(app);
+  return groups;
+}
+
+function classifyApp(app: DemoApp): AppKind {
   const haystack = `${app.id} ${app.name}`.toLowerCase();
-  if (/trino|starburst/.test(haystack)) return 'trino';
-  if (/security|soc|siem/.test(haystack)) return 'security';
-  if (/observability|apm|sre|kubernetes/.test(haystack)) return 'observability';
+  if (/starburst/.test(haystack)) return 'starburst';
+  if (/trino/.test(haystack)) return 'trino';
+  if (/security|soc|siem|threat/.test(haystack)) return 'security';
+  if (/observability|apm|sre|kubernetes|logs|metrics|traces/.test(haystack)) return 'observability';
   if (/elastic|kibana|dashbuilder/.test(haystack)) return 'elastic';
   return 'generic';
 }
 
-function buildElasticDemo(): DemoToolCall {
-  return {
-    id: `demo-elastic-${Date.now()}`,
-    appId: 'demo-elastic',
-    toolName: 'demo_security_dashboard',
-    toolInput: { demo: true, question: 'Show high-risk activity and investigation paths.' },
-    toolResult: { content: [{ type: 'text', text: 'Demo Elastic security dashboard preview.' }] },
-    resourceUri: 'ui://rubberband-demo/elastic-security-dashboard.html',
-    html: demoHtml('Elastic Security Demo', 'Risk triage', ['Critical alerts', 'Endpoint activity', 'Auth anomalies'], '#d36086'),
-    title: 'Elastic security triage preview'
-  };
-}
-
-function buildTrinoDemo(): DemoToolCall {
-  return {
-    id: `demo-trino-${Date.now()}`,
-    appId: 'rubberband',
-    toolName: 'trino_catalog_map',
-    toolInput: { demo: true, request: 'Map warehouse catalog relationships.' },
-    title: 'Trino catalog relationship demo',
-    toolResult: {
-      kind: 'trinoCatalogMap',
-      map: {
-        catalogs: [
-          { id: 'sales', tableCount: 18, schemaCount: 3, domains: ['commerce'], sampleTables: ['orders.fact_orders', 'customers.dim_customer'] },
-          { id: 'lakehouse', tableCount: 26, schemaCount: 4, domains: ['product', 'commerce'], sampleTables: ['events.clickstream', 'products.catalog'] },
-          { id: 'finance', tableCount: 11, schemaCount: 2, domains: ['finance'], sampleTables: ['billing.invoices', 'ledger.entries'] }
-        ],
-        links: [
-          { source: 'sales', target: 'lakehouse', strength: 7, reasons: ['customer_id', 'product_id', 'commerce domain'] },
-          { source: 'sales', target: 'finance', strength: 5, reasons: ['order_id', 'invoice_id'] },
-          { source: 'lakehouse', target: 'finance', strength: 3, reasons: ['product revenue rollups'] }
-        ],
-        skipped: { catalogs: 0, uninspectedTables: 0, inaccessibleCatalogs: [] }
-      }
+function inferRequiredConnections(apps: DemoApp[]): ConnectionTestTarget[] {
+  const targets = new Set<ConnectionTestTarget>(['llm']);
+  for (const app of apps) {
+    const kind = classifyApp(app);
+    if (kind === 'elastic' || kind === 'security' || kind === 'observability') {
+      targets.add('elastic');
+      targets.add('kibana');
     }
-  };
+    if (kind === 'trino') targets.add('trino');
+    if (kind === 'starburst') targets.add('starburst');
+  }
+  return [...targets];
 }
 
-function buildGenericDemo(app?: DemoApp): DemoToolCall {
-  return {
-    id: `demo-generic-${Date.now()}`,
-    appId: app?.id || 'rubberband-demo',
-    toolName: 'demo_preview',
-    toolInput: { demo: true },
-    toolResult: { content: [{ type: 'text', text: 'Demo MCP app preview.' }] },
-    resourceUri: 'ui://rubberband-demo/workspace-preview.html',
-    html: demoHtml('MCP Apps Demo', app?.name || 'Rubberband workspace', ['Discover tools', 'Generate preview', 'Iterate in chat'], '#54b399'),
-    title: `${app?.name || 'Rubberband'} demo preview`
-  };
+function isUsefulDemoTool(tool: DemoTool) {
+  const haystack = `${tool.name} ${tool.description || ''} ${tool.appName || ''}`.toLowerCase();
+  return Boolean(tool._meta?.ui?.resourceUri) || /visual|viz|chart|dashboard|graph|preview|query|sql|esql|discover|search|catalog|map/.test(haystack);
 }
 
-function demoHtml(title: string, subtitle: string, labels: string[], accent: string) {
-  const bars = labels.map((label, index) => `<div class="bar" style="--h:${48 + index * 18}%;--d:${index * 80}ms"><span>${escapeHtml(label)}</span></div>`).join('');
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <style>
-      body { margin: 0; font-family: Inter, Segoe UI, Arial, sans-serif; color: #22303c; background: #f7fafc; }
-      main { display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px; min-height: 100vh; padding: 24px; box-sizing: border-box; }
-      section { border: 1px solid #d8e2ec; border-radius: 8px; background: white; padding: 18px; box-shadow: 0 12px 28px rgba(35, 48, 60, 0.08); }
-      h1 { margin: 0 0 8px; font-size: 24px; }
-      p { margin: 0 0 16px; color: #5a6875; }
-      .metrics { display: grid; gap: 10px; }
-      .metric { display: flex; justify-content: space-between; border: 1px solid #e1e8ef; border-radius: 6px; padding: 10px; }
-      .metric strong { color: ${accent}; }
-      .chart { display: flex; align-items: end; gap: 12px; height: 260px; padding-top: 20px; }
-      .bar { position: relative; flex: 1; height: var(--h); min-height: 42px; border-radius: 7px 7px 3px 3px; background: linear-gradient(180deg, ${accent}, #7a869a); animation: rise 520ms ease-out both; animation-delay: var(--d); }
-      .bar span { position: absolute; left: 50%; bottom: -34px; transform: translateX(-50%); width: 130px; text-align: center; font-size: 12px; font-weight: 700; color: #465563; }
-      .nodeLayer { position: relative; height: 260px; }
-      .node { position: absolute; display: grid; place-items: center; width: 86px; height: 86px; border-radius: 50%; color: white; background: ${accent}; font-weight: 800; box-shadow: 0 12px 28px rgba(35,48,60,.18); }
-      .n1 { left: 8%; top: 18%; } .n2 { right: 12%; top: 8%; background: #6092c0; } .n3 { left: 42%; bottom: 8%; background: #54b399; }
-      .edge { position: absolute; height: 2px; background: #9aa9b8; transform-origin: left center; }
-      .e1 { left: 24%; top: 31%; width: 45%; transform: rotate(-8deg); } .e2 { left: 25%; top: 48%; width: 38%; transform: rotate(31deg); } .e3 { left: 55%; top: 54%; width: 30%; transform: rotate(-35deg); }
-      @keyframes rise { from { transform: scaleY(.35); opacity: .55; } to { transform: scaleY(1); opacity: 1; } }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section>
-        <h1>${escapeHtml(title)}</h1>
-        <p>${escapeHtml(subtitle)}</p>
-        <div class="metrics">
-          <div class="metric"><span>Read-only check</span><strong>OK</strong></div>
-          <div class="metric"><span>Preview generated</span><strong>Live</strong></div>
-          <div class="metric"><span>Workflow fit</span><strong>High</strong></div>
-        </div>
-        <div class="chart">${bars}</div>
-      </section>
-      <section>
-        <h1>Relationship view</h1>
-        <p>Use Rubberband preview controls for host-level pan and zoom.</p>
-        <div class="nodeLayer">
-          <div class="edge e1"></div><div class="edge e2"></div><div class="edge e3"></div>
-          <div class="node n1">Data</div><div class="node n2">Signals</div><div class="node n3">Action</div>
-        </div>
-      </section>
-    </main>
-  </body>
-</html>`;
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char));
+function formatList(values: string[]) {
+  const cleaned = values.filter(Boolean);
+  if (cleaned.length <= 1) return cleaned[0] || 'the selected connection';
+  if (cleaned.length === 2) return `${cleaned[0]} and ${cleaned[1]}`;
+  return `${cleaned.slice(0, -1).join(', ')}, and ${cleaned[cleaned.length - 1]}`;
 }

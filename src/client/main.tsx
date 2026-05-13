@@ -165,9 +165,22 @@ type RenderableToolCall = {
 };
 
 type DemoResponse = {
-  content: string;
-  followUps?: string[];
-  toolCalls?: RenderableToolCall[];
+  ok: boolean;
+  status: 'ready' | 'needs_apps' | 'needs_tools' | 'connection_failed';
+  title: string;
+  summary: string;
+  checks: Array<{
+    label: string;
+    ok: boolean;
+    detail: string;
+  }>;
+  prompts: Array<{
+    label: string;
+    prompt: string;
+    appIds: string[];
+    deepAnalysis: boolean;
+  }>;
+  appIds: string[];
   sanity?: {
     ok?: boolean;
     selectedAppIds?: string[];
@@ -314,6 +327,8 @@ type ServerProgressEvent = {
 type SubmitOptions = {
   progressMessage?: string;
   cleanupOnAbortMessageId?: string;
+  appIds?: string[];
+  deepAnalysis?: boolean;
 };
 
 type StoredConversation = {
@@ -347,6 +362,16 @@ const MAX_VIZ_INTERACTIONS_FOR_CONTEXT = 6;
 const MAX_CHAT_ATTACHMENTS = 4;
 const MAX_CHAT_ATTACHMENT_BYTES = 5_000_000;
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
+
+function formatDemoReadinessMessage(result: DemoResponse) {
+  const checks = result.checks
+    .map(check => `- ${check.ok ? 'OK' : 'Needs attention'}: ${check.label} - ${check.detail}`)
+    .join('\n');
+  const prompts = result.prompts.length
+    ? `\n\nAvailable demo paths:\n${result.prompts.map(prompt => `- ${prompt.label}`).join('\n')}`
+    : '';
+  return [`### ${result.title}`, '', result.summary, '', checks, prompts].filter(Boolean).join('\n');
+}
 
 function App() {
   const initialChatState = useMemo(() => loadChatState(), []);
@@ -716,8 +741,8 @@ function App() {
             role: message.role,
             content: messageContentForModel(message)
           })),
-          appIds: selectedAppIds,
-          deepAnalysis
+          appIds: options.appIds ?? selectedAppIds,
+          deepAnalysis: options.deepAnalysis ?? deepAnalysis
         })
       });
       setMessages(current => [
@@ -822,32 +847,40 @@ function App() {
     if (busy || demoRunning) return;
     setDemoRunning(true);
     setError(null);
-    setProgressMessage('Preparing live demo');
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'user',
-      content: 'Run the one-click Rubberband live demo.'
-    };
-    setMessages(current => [...current, userMessage]);
+    setProgressMessage('Checking live demo readiness');
     try {
       const result = await api<DemoResponse>('/api/demo', {
         method: 'POST',
         body: JSON.stringify({ appIds: selectedAppIds })
       });
-      const sanity = result.sanity?.ok ? `\n\nSanity check passed: ${result.sanity.availableApps || 0} apps and ${result.sanity.availableTools || 0} tools available.` : '';
-      setMessages(current => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: `${result.content}${sanity}`,
-          toolCalls: result.toolCalls || [],
-          followUps: result.followUps || []
-        }
-      ]);
-      setProgressMessage('Demo ready');
+      const prompt = result.prompts[0];
+      if (!result.ok || !prompt) {
+        setMessages(current => [
+          ...current,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: formatDemoReadinessMessage(result),
+            followUps: result.prompts.map(item => item.prompt)
+          }
+        ]);
+        setProgressMessage('Demo needs setup');
+        return;
+      }
+
+      const requestMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: prompt.prompt,
+        hidden: true
+      };
+      await submitMessages([...messages, requestMessage], {
+        progressMessage: `Running ${prompt.label}`,
+        cleanupOnAbortMessageId: requestMessage.id,
+        appIds: prompt.appIds.length ? prompt.appIds : result.appIds,
+        deepAnalysis: prompt.deepAnalysis
+      });
     } catch (err) {
-      setMessages(current => current.filter(message => message.id !== userMessage.id));
       setError(toUserError(err));
       setProgressMessage('Demo failed');
     } finally {
