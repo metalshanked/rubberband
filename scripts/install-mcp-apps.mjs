@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -63,6 +64,67 @@ async function unpackZip(zipPath, target, stripTopLevel) {
 
   await fs.rm(target, { recursive: true, force: true });
   await fs.rename(staging, target);
+}
+
+async function downloadFile(url, target) {
+  const response = await fetch(url, {
+    headers: {
+      'user-agent': 'rubberband-mcp-installer'
+    }
+  });
+  if (!response.ok) throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await fs.writeFile(target, bytes);
+}
+
+async function verifySha256(filePath, expected) {
+  if (!expected) return;
+  const hash = createHash('sha256');
+  hash.update(await fs.readFile(filePath));
+  const actual = hash.digest('hex');
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(`SHA-256 mismatch for ${filePath}: expected ${expected}, got ${actual}`);
+  }
+}
+
+function safeFilePart(value) {
+  return String(value || 'artifact').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+}
+
+async function installSkillPack(appDir, pack, index) {
+  const workDir = path.join(appDir, '.rubberband-skill-packs');
+  const skillsRoot = path.join(appDir, 'skills');
+  assertInside(workDir, installRoot);
+  assertInside(skillsRoot, installRoot);
+  await fs.mkdir(workDir, { recursive: true });
+  await fs.mkdir(skillsRoot, { recursive: true });
+
+  const sourceName = pack.name || path.basename(pack.path || pack.url || `skill-${index}.zip`);
+  const zipPath = path.join(workDir, `${String(index).padStart(2, '0')}-${safeFilePart(sourceName)}`);
+  assertInside(zipPath, installRoot);
+  if (pack.url) {
+    await downloadFile(pack.url, zipPath);
+  } else if (pack.path) {
+    const sourcePath = path.resolve(workspace, pack.path);
+    if (!existsSync(sourcePath)) throw new Error(`Skill pack not found: ${sourcePath}`);
+    await fs.copyFile(sourcePath, zipPath);
+  } else {
+    throw new Error(`Skill pack for ${appDir} needs url or path`);
+  }
+  await verifySha256(zipPath, pack.sha256);
+
+  const unpacked = path.join(workDir, `${String(index).padStart(2, '0')}-${safeFilePart(sourceName)}-unpacked`);
+  assertInside(unpacked, installRoot);
+  await unpackZip(zipPath, unpacked, pack.stripTopLevel === true);
+  const entries = await fs.readdir(unpacked, { withFileTypes: true });
+  for (const entry of entries) {
+    const source = path.join(unpacked, entry.name);
+    const target = path.join(skillsRoot, entry.name);
+    assertInside(source, installRoot);
+    assertInside(target, skillsRoot);
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.rename(source, target);
+  }
 }
 
 function interpolate(value, appDir) {
@@ -147,6 +209,11 @@ async function installApp(app) {
     const [command, ...args] = step.map(part => interpolate(part, appDir));
     await run(command, args, { cwd: appDir });
   }
+
+  for (const [index, pack] of (app.skillPacks || []).entries()) {
+    await installSkillPack(appDir, pack, index);
+  }
+  await fs.rm(path.join(appDir, '.rubberband-skill-packs'), { recursive: true, force: true });
 
   const skills = await discoverSkills(appDir);
 

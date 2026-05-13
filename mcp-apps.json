@@ -81,11 +81,43 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-observability.git",
-        "ref": "a8799b7149d483f82c8792fbe6c457ce85a2702e"
+        "ref": "cd5f7d936106fdf671fb24ca2b33ac300ee55ed9"
       },
       "install": [
         ["npm", "install"],
         ["npm", "run", "build"]
+      ],
+      "skillPacks": [
+        {
+          "name": "apm-health-summary.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/apm-health-summary.zip",
+          "sha256": "8ec8737be8534ea573badfb05816d98518067b8eaa31ad2740064785d7554e13"
+        },
+        {
+          "name": "apm-service-dependencies.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/apm-service-dependencies.zip",
+          "sha256": "02c95dcca9465751fabb3e900323f8a30a6637b57d744e48499f34f41a105720"
+        },
+        {
+          "name": "k8s-blast-radius.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/k8s-blast-radius.zip",
+          "sha256": "ed615ee9039555456aafba7d8289625db55b7a3af88739e86942329f3fb9e0af"
+        },
+        {
+          "name": "manage-alerts.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/manage-alerts.zip",
+          "sha256": "4413ec37bd6259155d02c78c58d98ab4dd0d9b341d19bfaf180362c2c2bceba9"
+        },
+        {
+          "name": "ml-anomalies.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/ml-anomalies.zip",
+          "sha256": "7849e460a16b651e7da86e60e424ac0a98b35df4bde47a261ce7fbd8484d570a"
+        },
+        {
+          "name": "observe.zip",
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/observe.zip",
+          "sha256": "77c5774e0642e2bd6f97f0f3b6cba937aaf3f910b4985c0af8bfc5e539e0a979"
+        }
       ],
       "transport": {
         "type": "stdio",

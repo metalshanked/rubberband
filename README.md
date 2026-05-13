@@ -251,8 +251,9 @@ During Docker build or `npm run mcp:install`, Rubberband:
 1. Reads `MCP_APPS_CONFIG`, defaulting to `mcp-apps.json`.
 2. Clones or extracts each configured app. The default config pins Git apps to commit SHAs so Docker builds do not silently float to a new upstream commit.
 3. Runs each app's configured install/build commands.
-4. Scans app skills from `skills/**/SKILL.md`.
-5. Writes `mcp-apps.installed.json`.
+4. Downloads and verifies configured skill packs, then extracts them under the app's `skills/` directory.
+5. Scans app skills from `skills/**/SKILL.md`.
+6. Writes `mcp-apps.installed.json`.
 
 At runtime, `McpRegistry` reads the installed manifest and starts each app using its configured transport.
 
@@ -265,7 +266,9 @@ flowchart TD
   Git --> Install[Run install commands]
   Zip --> Install
   Install --> Build[Build app]
-  Build --> Skills[Scan skills]
+  Build --> SkillPacks[Download configured skill packs]
+  SkillPacks --> Verify[Verify SHA-256]
+  Verify --> Skills[Scan skills]
   Skills --> Manifest[mcp-apps.installed.json]
   Manifest --> Runtime[MCP registry runtime]
 ```
@@ -276,6 +279,7 @@ Each app entry supports:
 
 - `source`: `{ "type": "git", "url": "...", "ref": "<branch-or-40-char-commit-sha>" }` or `{ "type": "zip", "path": "./vendor/app.zip" }`
 - `install`: command arrays run in the app directory during image build.
+- `skillPacks`: optional `.zip` skill assets to download or copy into `skills/`; each entry supports `url` or `path`, plus optional `sha256`.
 - `transport`: stdio or HTTP runtime connection details.
 - `envPassthrough`: environment variables copied into the MCP app process.
 - `skills`: generated at install time from discovered skill files.
@@ -578,7 +582,16 @@ If `ELASTIC_CCS_SEARCH_BY_DEFAULT=true`, the Elastic background profile includes
 
 ## App Skills
 
-During `npm run mcp:install`, Rubberband scans each installed MCP app for `skills/**/SKILL.md`. Discovered skills are written into `mcp-apps.installed.json`.
+During `npm run mcp:install`, Rubberband downloads any configured app skill packs, verifies their SHA-256 hashes when provided, extracts them under `skills/`, and scans each installed MCP app for `skills/**/SKILL.md`. Discovered skills are written into `mcp-apps.installed.json`.
+
+The default Elastic Observability app pins the app source to the v1.1.1 release commit and installs the v1.1.1 skill packs from that same upstream release:
+
+- `apm-health-summary`
+- `apm-service-dependencies`
+- `k8s-blast-radius`
+- `manage-alerts`
+- `ml-anomalies`
+- `observe`
 
 At chat time:
 

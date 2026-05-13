@@ -20,6 +20,11 @@ the default Docker build. `mcp_apps/` and `mcp-apps.installed.json` are generate
 local/runtime artifacts and are not part of Rubberband's MIT-licensed source
 tree.
 
+The default Elastic Observability install also downloads skill packs from the
+Elastic Observability MCP App GitHub release configured in `mcp-apps.json`.
+Those skill packs are part of the same upstream Elastic Observability project
+and are covered by that upstream license, not Rubberband's MIT license.
+
 Docker images built with the default `Dockerfile` include the installed MCP app
 code. Such images should be described as Rubberband plus bundled third-party MCP
 apps, not as an all-MIT distribution.

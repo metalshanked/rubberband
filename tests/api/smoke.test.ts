@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomInt } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
+import fs from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
+import JSZip from 'jszip';
 import {
   buildAuthorizationHeader,
   buildSystemPrompt,
@@ -237,6 +240,63 @@ test('demo planner creates public live-data prompts for selected MCP apps', () =
   assert.ok(plan.prompts.every(prompt => prompt.narration.length > 20));
   assert.match(plan.prompts.map(prompt => prompt.prompt).join('\n'), /actual available data|actual queryable data/i);
   assert.doesNotMatch(JSON.stringify(plan), /canned|fake|placeholder|internal/i);
+});
+
+test('MCP installer extracts configured skill packs into installed manifest', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rubberband-installer-'));
+  try {
+    const appZip = new JSZip();
+    appZip.file('fixture-app/README.md', 'fixture app');
+    await fs.writeFile(path.join(tempDir, 'fixture-app.zip'), await appZip.generateAsync({ type: 'nodebuffer' }));
+
+    const skillZip = new JSZip();
+    skillZip.file('demo-skill/SKILL.md', ['name: demo-skill', 'description: Demo skill guidance.', '', '# Demo Skill', 'Use this skill for installer tests.'].join('\n'));
+    const skillBytes = await skillZip.generateAsync({ type: 'nodebuffer' });
+    await fs.writeFile(path.join(tempDir, 'demo-skill.zip'), skillBytes);
+    const skillHash = createHash('sha256').update(skillBytes).digest('hex');
+
+    await fs.writeFile(
+      path.join(tempDir, 'mcp-apps.json'),
+      JSON.stringify(
+        {
+          apps: [
+            {
+              id: 'fixture-app',
+              name: 'Fixture App',
+              source: { type: 'zip', path: './fixture-app.zip' },
+              skillPacks: [{ path: './demo-skill.zip', sha256: skillHash }],
+              transport: { type: 'stdio', command: 'node', args: ['-e', 'process.exit(0)'] }
+            }
+          ]
+        },
+        null,
+        2
+      )
+    );
+
+    await runChild(process.execPath, [path.resolve('scripts/install-mcp-apps.mjs')], {
+      cwd: tempDir,
+      env: {
+        ...process.env,
+        MCP_APPS_CONFIG: 'mcp-apps.json',
+        MCP_APPS_DIR: 'mcp_apps',
+        MCP_APPS_OUTPUT: 'mcp-apps.installed.json'
+      }
+    });
+
+    const manifest = JSON.parse(await fs.readFile(path.join(tempDir, 'mcp-apps.installed.json'), 'utf8')) as {
+      apps: Array<{ id: string; skills: Array<{ name: string; description: string; path: string; content: string }> }>;
+    };
+    const app = manifest.apps.find(item => item.id === 'fixture-app');
+    assert.ok(app);
+    assert.equal(app.skills.length, 1);
+    assert.equal(app.skills[0].name, 'demo-skill');
+    assert.equal(app.skills[0].description, 'Demo skill guidance.');
+    assert.equal(app.skills[0].path, 'skills/demo-skill/SKILL.md');
+    assert.match(app.skills[0].content, /Use this skill for installer tests/);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('settings connection test endpoint returns a structured result', async () => {
@@ -1743,6 +1803,31 @@ function mapSettings(values: Record<string, string>) {
     get: (key: string) => values[key] || '',
     isInsecureTlsEnabled: () => false
   };
+}
+
+function runChild(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: 'pipe'
+    });
+    let output = '';
+    child.stdout?.on('data', chunk => {
+      output += chunk;
+    });
+    child.stderr?.on('data', chunk => {
+      output += chunk;
+    });
+    child.on('error', reject);
+    child.on('exit', code => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${command} ${args.join(' ')} failed with exit code ${code}\n${output}`));
+      }
+    });
+  });
 }
 
 async function waitForHealth(url: string, child?: ChildProcess) {
