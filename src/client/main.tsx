@@ -384,7 +384,7 @@ function formatDemoIntroMessage(result: DemoResponse) {
     '',
     'Rubberband is a chat workspace for analytics MCP apps. It can discover tools, call them safely in a read-only flow, and render interactive charts or app previews directly inside the conversation.',
     '',
-    `For this demo I found ${appNames}. I will keep the first steps simple and visual, then use Deep Analysis at the end because it is the heavier path.`,
+    `For this demo I found ${appNames}. I will start with quick visual steps, then finish with Deep Analysis for a broader read.`,
     '',
     'What I will cover:',
     steps
@@ -397,16 +397,39 @@ function formatDemoStepMessage(prompt: DemoResponse['prompts'][number], index: n
 }
 
 function formatDemoRecoveryMessage(prompt: DemoResponse['prompts'][number], error?: UserError) {
-  const reason = error?.message ? ` The tool path reported: ${error.message}` : '';
+  const reason = error?.message ? ` Technical note: ${error.message}` : '';
   return [
-    `### ${prompt.label} did not complete`,
+    `### Step skipped gracefully: ${prompt.label}`,
     '',
-    `I will keep the demo moving instead of stopping here.${reason}`,
+    `That step took the scenic route and did not make it back in time. I will keep the demo moving.${reason}`,
     '',
     prompt.deepAnalysis
-      ? 'Deep Analysis is the most expensive path, so this failure does not affect the faster visualization flow above.'
-      : 'This usually means the selected app had no quick matching data or a tool timed out. The next step will try a simpler path.'
+      ? 'Deep Analysis is designed for broader synthesis, so it can be more sensitive to timeouts or connector limits. The visual demo above is still usable.'
+      : 'This usually means the selected app had no quick matching data or a tool timed out. The next step will try a simpler route.'
   ].join('\n');
+}
+
+function formatDemoWrapUpMessage(result: DemoResponse, completedSteps: string[], skippedSteps: string[]) {
+  const completed = completedSteps.length ? `Completed: ${completedSteps.join(', ')}.` : 'The live steps could not complete this time.';
+  const skipped = skippedSteps.length ? `Skipped gracefully: ${skippedSteps.join(', ')}.` : '';
+  return [
+    '### Demo wrap-up',
+    '',
+    completed,
+    skipped,
+    '',
+    'What you can try next:',
+    '- Ask for a different chart type, such as a bar chart, trend line, table, or graph.',
+    '- Select a different MCP app or narrow the question to a known index, catalog, schema, or table.',
+    '- Use Deep Analysis when you want a broader read across the available context.',
+    '- Export the conversation when you want a shareable Markdown, DOCX, or PDF artifact.',
+    '',
+    result.prompts.some(prompt => prompt.deepAnalysis)
+      ? 'If Deep Analysis had a quiet moment, the regular visual workflow still shows the main Rubberband loop: ask, preview, refine, and share.'
+      : 'This is the main Rubberband loop: ask, preview, refine, and share.'
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function buildFallbackDemoMessages(result?: DemoResponse, error?: UserError): ChatMessage[] {
@@ -461,9 +484,24 @@ function buildFallbackDemoMessages(result?: DemoResponse, error?: UserError): Ch
       content: [
         '### Step 3 of 3: Live mode adds your data',
         '',
-        'When connectors and the LLM are configured, this same presenter flow runs against real selected apps. Quick visual steps run first, and Deep Analysis stays last for heavier investigation.'
+        'When connectors and the LLM are configured, this same presenter flow runs against real selected apps. Quick visual steps run first, and Deep Analysis wraps up with a broader read.'
       ].join('\n'),
       toolCalls: [buildFallbackDemoToolCall('flow')]
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: [
+        '### Wrap-up: what to try next',
+        '',
+        'Connect an MCP app and an LLM, then run the demo again for live data.',
+        '',
+        'Good first prompts:',
+        '- Build a chart from a known index or data view.',
+        '- Show a Trino catalog or table relationship graph.',
+        '- Summarize the current preview and suggest the next investigation.',
+        '- Export the chat as Markdown, DOCX, or PDF.'
+      ].join('\n')
     }
   ];
 }
@@ -551,10 +589,10 @@ function fallbackWorkspaceHtml() {
 
 function fallbackVisualsHtml() {
   return `<main>
-    <div class="hero"><div><h1>Charts, Dashboards, Graphs</h1><p>Rubberband can host app-generated UI previews alongside normal markdown answers.</p></div><div class="badge">Low effort, high impact</div></div>
+    <div class="hero"><div><h1>Charts, Dashboards, Graphs</h1><p>Rubberband can host app-generated UI previews alongside normal markdown answers.</p></div><div class="badge">Simple inputs, polished outputs</div></div>
     <div class="grid">
       <section class="panel"><h1>Demo-ready visual types</h1><p>Simple views tend to be the most reliable live: trend, top-N, status, relationship graph.</p><svg class="lineChart" viewBox="0 0 520 230" role="img" aria-label="Static line chart"><rect x="0" y="0" width="520" height="230" rx="8" fill="#fff"/><g stroke="#d7e0ea"><line x1="42" x2="500" y1="185" y2="185"/><line x1="42" x2="500" y1="135" y2="135"/><line x1="42" x2="500" y1="85" y2="85"/><line x1="42" x2="500" y1="35" y2="35"/></g><polyline fill="none" stroke="#3478c6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" points="42,172 110,144 178,156 246,92 314,108 382,62 470,42"/><polyline fill="none" stroke="#18a058" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" points="42,190 110,182 178,132 246,146 314,96 382,116 470,78"/><g fill="#182531" font-size="12" font-weight="800"><text x="42" y="213">Now</text><text x="418" y="213">Actionable</text></g></svg></section>
-      <section class="panel"><h1>Presenter script</h1><p>Each live step explains what is happening before the tool call, then the preview lands below it.</p><div class="flow"><div class="step"><div class="num">1</div><div><strong>Quick chart</strong><span>Normal MCP chat path</span></div><div class="mode">fast</div></div><div class="step"><div class="num">2</div><div><strong>Graph or dashboard</strong><span>Simple bounded request</span></div><div class="mode">visual</div></div><div class="step"><div class="num">3</div><div><strong>Deep Analysis</strong><span>Heavier synthesis last</span></div><div class="mode">deep</div></div></div></section>
+      <section class="panel"><h1>Presenter script</h1><p>Each live step explains what is happening before the tool call, then the preview lands below it.</p><div class="flow"><div class="step"><div class="num">1</div><div><strong>Quick chart</strong><span>Normal MCP chat path</span></div><div class="mode">fast</div></div><div class="step"><div class="num">2</div><div><strong>Graph or dashboard</strong><span>Simple bounded request</span></div><div class="mode">visual</div></div><div class="step"><div class="num">3</div><div><strong>Deep Analysis</strong><span>Broader synthesis last</span></div><div class="mode">deep</div></div></div></section>
     </div>
   </main>`;
 }
@@ -566,7 +604,7 @@ function fallbackFlowHtml() {
       <div class="step"><div class="num">1</div><div><strong>Precheck</strong><span>Confirm apps, tools, and live connection settings.</span></div><div class="mode">ready</div></div>
       <div class="step"><div class="num">2</div><div><strong>Quick visual</strong><span>Small chart or graph first for a reliable first impression.</span></div><div class="mode">normal</div></div>
       <div class="step"><div class="num">3</div><div><strong>Second angle</strong><span>Show another app or visualization type if available.</span></div><div class="mode">bounded</div></div>
-      <div class="step"><div class="num">4</div><div><strong>Deep Analysis</strong><span>Use the heavier agent path only after the simple visuals have landed.</span></div><div class="mode">last</div></div>
+      <div class="step"><div class="num">4</div><div><strong>Deep Analysis</strong><span>Use the broader analysis pass after the simple visuals have landed.</span></div><div class="mode">last</div></div>
       <div class="step"><div class="num">5</div><div><strong>Recover</strong><span>Turn tool errors into plain-language presenter notes and continue.</span></div><div class="mode">safe</div></div>
     </div>
   </main>`;
@@ -1070,6 +1108,8 @@ function App() {
         }
       ];
       setMessages(demoMessages);
+      const completedSteps: string[] = [];
+      const skippedSteps: string[] = [];
 
       for (const [index, demoPrompt] of result.prompts.entries()) {
         const presenterMessage: ChatMessage = {
@@ -1093,9 +1133,11 @@ function App() {
         });
         if (stepResult.ok) {
           demoMessages = [...demoMessages, stepResult.message];
+          completedSteps.push(demoPrompt.label);
         } else if (stepResult.aborted) {
           return;
         } else {
+          skippedSteps.push(demoPrompt.label);
           const recoveryMessage: ChatMessage = {
             id: crypto.randomUUID(),
             role: 'assistant',
@@ -1105,6 +1147,15 @@ function App() {
           setMessages(demoMessages);
         }
       }
+      demoMessages = [
+        ...demoMessages,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: formatDemoWrapUpMessage(result, completedSteps, skippedSteps)
+        }
+      ];
+      setMessages(demoMessages);
       setProgressMessage('Demo complete');
     } catch (err) {
       setMessages(current => [...current, ...buildFallbackDemoMessages(undefined, toUserError(err))]);

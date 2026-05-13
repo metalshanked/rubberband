@@ -1039,6 +1039,8 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Step 1 of 1: Elastic dashboard' })).toBeVisible();
   await expect(page.getByText('Live data demo preview ready.')).toBeVisible();
   await expect(page.getByText('Elastic live preview')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Demo wrap-up' })).toBeVisible();
+  await expect(page.getByText('What you can try next:')).toBeVisible();
   await expect(page.getByLabel('Suggested follow-up questions')).toBeVisible();
   expect(demoBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
   expect(chatBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
@@ -1087,7 +1089,64 @@ test('falls back to a static feature tour when live demo is unavailable', async 
   await expect(page.getByText('Rubberband workspace tour')).toBeVisible();
   await expect(page.getByText('Visualization feature tour')).toBeVisible();
   await expect(page.getByText('Live demo flow tour')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Wrap-up: what to try next' })).toBeVisible();
   expect(chatCalled).toBe(false);
+});
+
+test('recovers gracefully when a live demo step fails', async ({ page }) => {
+  await page.route('**/api/apps', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ apps: [{ id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' }] })
+    });
+  });
+  await page.route('**/api/tools', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ tools: [{ appId: 'dashbuilder', appName: 'Elastic Dashbuilder', name: 'create_chart' }] })
+    });
+  });
+  await page.route('**/api/demo', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        status: 'ready',
+        title: 'Live demo ready',
+        summary: 'Ready to run a live data demo with Elastic Dashbuilder.',
+        checks: [{ label: 'MCP apps', ok: true, detail: '1 app ready' }],
+        appIds: ['dashbuilder'],
+        prompts: [
+          {
+            label: 'Deep Analysis wrap-up',
+            narration: 'Finally I will switch on Deep Analysis for a broader read.',
+            appIds: ['dashbuilder'],
+            deepAnalysis: true,
+            prompt: 'Run a bounded read-only Deep Analysis wrap-up.'
+          }
+        ],
+        sanity: { ok: true, availableApps: 1, availableTools: 1, demoApps: ['dashbuilder'] }
+      })
+    });
+  });
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Rubberband hit an error while handling the request.' })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByRole('button', { name: 'Run live demo' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Step skipped gracefully: Deep Analysis wrap-up' })).toBeVisible();
+  await expect(page.getByText('That step took the scenic route and did not make it back in time.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Demo wrap-up' })).toBeVisible();
+  await expect(page.getByText('Skipped gracefully: Deep Analysis wrap-up.')).toBeVisible();
 });
 
 test('sends selected MCP app ids and Deep Analysis mode with a chat turn', async ({ page }) => {

@@ -166,7 +166,7 @@ function buildDemoPrompts(apps: DemoApp[], tools: DemoTool[]): DemoPrompt[] {
   if (groups.elastic.length) {
     quickPrompts.push({
       label: 'Elastic chart preview',
-      narration: 'Now I will use the Elastic app to create a high-impact chart directly in the chat, using live data rather than a prepared screenshot.',
+      narration: 'Now I will use the Elastic app to create a clear chart directly in the chat, using live data rather than a prepared screenshot.',
       appIds: groups.elastic.map(app => app.id),
       deepAnalysis: false,
       prompt: [
@@ -218,7 +218,7 @@ function buildDemoPrompts(apps: DemoApp[], tools: DemoTool[]): DemoPrompt[] {
       ? [
           {
             label: 'Deep Analysis wrap-up',
-            narration: 'Finally I will switch on Deep Analysis for a heavier read-only pass that connects what we saw and suggests the next useful investigation.',
+            narration: 'Finally I will switch on Deep Analysis for a broader read-only pass that connects what we saw and suggests the next useful investigation.',
             appIds: quickAppIds,
             deepAnalysis: true,
             prompt: [
