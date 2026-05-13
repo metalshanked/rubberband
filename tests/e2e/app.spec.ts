@@ -947,6 +947,89 @@ test('reloads MCP apps and tools from the topbar', async ({ page }) => {
   expect(refreshCalled).toBe(true);
 });
 
+test('runs one-click live demo from selected apps', async ({ page }) => {
+  let demoBody: { appIds?: string[] } | undefined;
+
+  await page.route('**/api/apps', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        apps: [
+          { id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' },
+          { id: 'mcp-app-trino', name: 'Trino Visualization', status: 'connected' }
+        ]
+      })
+    });
+  });
+  await page.route('**/api/tools', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        tools: [
+          { appId: 'dashbuilder', appName: 'Elastic Dashbuilder', name: 'create_chart' },
+          { appId: 'mcp-app-trino', appName: 'Trino Visualization', name: 'visualize_query' }
+        ]
+      })
+    });
+  });
+  await page.route('**/api/demo', async route => {
+    demoBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: '# Rubberband Live Demo\n\nSanity check: 2 selected apps detected.\n\n## Canned Questions\n1. Build an incident dashboard.\n2. Map warehouse relationships.',
+        followUps: ['Build an incident dashboard.', 'Map warehouse relationships.'],
+        sanity: { ok: true, availableApps: 2, availableTools: 2 },
+        toolCalls: [
+          {
+            id: 'demo-elastic',
+            appId: 'demo-elastic',
+            toolName: 'demo_security_dashboard',
+            toolInput: { demo: true },
+            toolResult: { content: [] },
+            html: '<!doctype html><html><body><main><h1>Elastic demo preview</h1></main></body></html>',
+            resourceUri: 'ui://rubberband-demo/elastic.html',
+            title: 'Elastic security triage preview'
+          },
+          {
+            id: 'demo-trino',
+            appId: 'rubberband',
+            toolName: 'trino_catalog_map',
+            toolInput: { demo: true },
+            title: 'Trino catalog relationship demo',
+            toolResult: {
+              kind: 'trinoCatalogMap',
+              map: {
+                catalogs: [
+                  { id: 'sales', tableCount: 12, schemaCount: 2, domains: ['commerce'], sampleTables: ['orders.fact_orders'] },
+                  { id: 'finance', tableCount: 8, schemaCount: 1, domains: ['finance'], sampleTables: ['billing.invoices'] }
+                ],
+                links: [{ source: 'sales', target: 'finance', strength: 5, reasons: ['invoice_id'] }],
+                skipped: { catalogs: 0, uninspectedTables: 0, inaccessibleCatalogs: [] }
+              }
+            }
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await expect(page.getByLabel('Elastic Dashbuilder')).toBeChecked();
+  await expect(page.getByLabel('Trino Visualization')).toBeChecked();
+  await page.getByRole('button', { name: 'Run live demo' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Rubberband Live Demo' })).toBeVisible();
+  await expect(page.getByText('Sanity check passed: 2 apps and 2 tools available.')).toBeVisible();
+  await expect(page.getByText('Elastic security triage preview')).toBeVisible();
+  await expect(page.getByText('Trino catalog relationship demo')).toBeVisible();
+  await expect(page.getByLabel('Suggested follow-up questions')).toBeVisible();
+  expect(demoBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
+});
+
 test('sends selected MCP app ids and Deep Analysis mode with a chat turn', async ({ page }) => {
   let chatBody: { appIds?: string[]; deepAnalysis?: boolean } | undefined;
 

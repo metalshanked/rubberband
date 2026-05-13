@@ -14,6 +14,7 @@ import type { ProgressEvent } from './progress.js';
 import { explainError, sanitizeErrorMessage } from './error-explainer.js';
 import { AnalyticsProfileService } from './analytics-profile-service.js';
 import { testExternalConnection } from './connection-tests.js';
+import { buildDemoPayload } from './demo.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '../..');
@@ -62,6 +63,10 @@ const settingsBodySchema = z.object({
 const settingsTestBodySchema = z.object({
   target: z.enum(['llm', 'elastic', 'kibana', 'trino', 'starburst']),
   values: z.record(z.string(), z.unknown()).default({})
+});
+
+const demoBodySchema = z.object({
+  appIds: z.array(z.string()).optional()
 });
 
 async function main() {
@@ -197,6 +202,19 @@ async function main() {
     try {
       const session = sessions.get(req, res);
       res.json(await session.registry.listExposure());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/api/demo', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const body = demoBodySchema.parse(req.body || {});
+      session.progress.publish('Preparing live demo');
+      const apps = session.registry.listApps();
+      const tools = await session.registry.listTools().catch(() => []);
+      res.json(buildDemoPayload(apps, tools as never, body.appIds || []));
     } catch (error) {
       next(error);
     }

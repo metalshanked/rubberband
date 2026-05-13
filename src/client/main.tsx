@@ -38,6 +38,7 @@ import {
   Send,
   Settings,
   ShieldAlert,
+  Sparkles,
   Table2,
   Trash2,
   ZoomIn,
@@ -161,6 +162,19 @@ type RenderableToolCall = {
   title: string;
   interactionEvents?: VizInteractionEvent[];
   previewRevision?: number;
+};
+
+type DemoResponse = {
+  content: string;
+  followUps?: string[];
+  toolCalls?: RenderableToolCall[];
+  sanity?: {
+    ok?: boolean;
+    selectedAppIds?: string[];
+    availableApps?: number;
+    availableTools?: number;
+    demoApps?: string[];
+  };
 };
 
 type ToolResultUpdate = {
@@ -379,6 +393,7 @@ function App() {
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [refreshingApps, setRefreshingApps] = useState(false);
+  const [demoRunning, setDemoRunning] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [progressMessage, setProgressMessage] = useState('Starting request');
   const [progressExpanded, setProgressExpanded] = useState(false);
@@ -800,6 +815,43 @@ function App() {
       setError(toUserError(err));
     } finally {
       setRefreshingApps(false);
+    }
+  }
+
+  async function runLiveDemo() {
+    if (busy || demoRunning) return;
+    setDemoRunning(true);
+    setError(null);
+    setProgressMessage('Preparing live demo');
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: 'Run the one-click Rubberband live demo.'
+    };
+    setMessages(current => [...current, userMessage]);
+    try {
+      const result = await api<DemoResponse>('/api/demo', {
+        method: 'POST',
+        body: JSON.stringify({ appIds: selectedAppIds })
+      });
+      const sanity = result.sanity?.ok ? `\n\nSanity check passed: ${result.sanity.availableApps || 0} apps and ${result.sanity.availableTools || 0} tools available.` : '';
+      setMessages(current => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: `${result.content}${sanity}`,
+          toolCalls: result.toolCalls || [],
+          followUps: result.followUps || []
+        }
+      ]);
+      setProgressMessage('Demo ready');
+    } catch (err) {
+      setMessages(current => current.filter(message => message.id !== userMessage.id));
+      setError(toUserError(err));
+      setProgressMessage('Demo failed');
+    } finally {
+      setDemoRunning(false);
     }
   }
 
@@ -1329,6 +1381,10 @@ function App() {
         <div className="topbar">
           <p className="chatContext">{selectedAppSummary()}</p>
           <div className="topbarActions">
+            <button className="demoButton" onClick={runLiveDemo} disabled={busy || demoRunning} title="Run live demo" aria-label="Run live demo">
+              {demoRunning ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              <span>Demo</span>
+            </button>
             <div className="exportMenu" ref={exportMenuRef}>
               <button
                 className="exportButton"

@@ -709,12 +709,12 @@ input {
   position: relative;
 }
 
+.demoButton,
 .exportButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 96px;
   height: 38px;
   border: 1px solid #d8dee6;
   padding: 0 10px;
@@ -724,11 +724,29 @@ input {
   cursor: pointer;
 }
 
+.demoButton {
+  min-width: 82px;
+  color: #17324d;
+  border-color: #9dc2df;
+  background: #eef7ff;
+}
+
+.exportButton {
+  min-width: 96px;
+}
+
+.demoButton:hover:not(:disabled) {
+  border-color: #6ea9d4;
+  background: #dff1ff;
+}
+
+.demoButton span,
 .exportButton span {
   font-size: 12px;
   font-weight: 700;
 }
 
+.demoButton:disabled,
 .exportButton:disabled {
   cursor: not-allowed;
   opacity: 0.5;

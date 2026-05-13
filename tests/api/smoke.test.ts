@@ -197,6 +197,22 @@ test('settings endpoint exposes read-only MCP safety controls', async () => {
   assert.equal(fields.get('ELASTICSEARCH_AUTO_CREATE_API_KEY')?.type, 'checkbox');
 });
 
+test('demo endpoint returns a local one-click demo payload', async () => {
+  const response = await fetch(`${baseUrl}/api/demo`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ appIds: [] })
+  });
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { content: string; followUps: string[]; toolCalls: unknown[]; sanity: { ok: boolean; availableApps: number } };
+
+  assert.equal(body.sanity.ok, true);
+  assert.equal(body.sanity.availableApps, 0);
+  assert.match(body.content, /Rubberband Live Demo/);
+  assert.ok(body.followUps.length > 0);
+  assert.ok(body.toolCalls.length > 0);
+});
+
 test('settings connection test endpoint returns a structured result', async () => {
   const response = await fetch(`${baseUrl}/api/settings/test`, {
     method: 'POST',
