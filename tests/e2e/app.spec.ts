@@ -1046,6 +1046,50 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
   expect(chatBody?.messages?.at(-1)?.content).toContain('Use actual available data');
 });
 
+test('falls back to a static feature tour when live demo is unavailable', async ({ page }) => {
+  let chatCalled = false;
+
+  await page.route('**/api/apps', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apps: [] }) });
+  });
+  await page.route('**/api/tools', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tools: [] }) });
+  });
+  await page.route('**/api/demo', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: false,
+        status: 'needs_apps',
+        title: 'Select an MCP app to run a live demo',
+        summary: 'No available MCP apps were found for a live demo.',
+        checks: [
+          { label: 'MCP apps', ok: false, detail: 'No apps available' },
+          { label: 'MCP tools', ok: false, detail: 'No tools discovered' }
+        ],
+        prompts: [],
+        appIds: [],
+        sanity: { ok: false, availableApps: 0, availableTools: 0, demoApps: [] }
+      })
+    });
+  });
+  await page.route('**/api/chat', async route => {
+    chatCalled = true;
+    await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'chat should not be called for fallback demo' }) });
+  });
+
+  await page.goto(appPath());
+  await page.getByRole('button', { name: 'Run live demo' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Rubberband Demo' })).toBeVisible();
+  await expect(page.getByText(/static feature tour/i)).toBeVisible();
+  await expect(page.getByText('Rubberband workspace tour')).toBeVisible();
+  await expect(page.getByText('Visualization feature tour')).toBeVisible();
+  await expect(page.getByText('Live demo flow tour')).toBeVisible();
+  expect(chatCalled).toBe(false);
+});
+
 test('sends selected MCP app ids and Deep Analysis mode with a chat turn', async ({ page }) => {
   let chatBody: { appIds?: string[]; deepAnalysis?: boolean } | undefined;
 

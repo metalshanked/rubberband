@@ -376,16 +376,6 @@ const MAX_CHAT_ATTACHMENTS = 4;
 const MAX_CHAT_ATTACHMENT_BYTES = 5_000_000;
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
 
-function formatDemoReadinessMessage(result: DemoResponse) {
-  const checks = result.checks
-    .map(check => `- ${check.ok ? 'OK' : 'Needs attention'}: ${check.label} - ${check.detail}`)
-    .join('\n');
-  const prompts = result.prompts.length
-    ? `\n\nAvailable demo paths:\n${result.prompts.map(prompt => `- ${prompt.label}`).join('\n')}`
-    : '';
-  return [`### ${result.title}`, '', result.summary, '', checks, prompts].filter(Boolean).join('\n');
-}
-
 function formatDemoIntroMessage(result: DemoResponse) {
   const appNames = result.sanity?.demoApps?.length ? `${result.sanity.demoApps.length} selected MCP app${result.sanity.demoApps.length === 1 ? '' : 's'}` : 'the selected MCP apps';
   const steps = result.prompts.map((prompt, index) => `${index + 1}. ${prompt.label}${prompt.deepAnalysis ? ' (Deep Analysis)' : ''}`).join('\n');
@@ -417,6 +407,169 @@ function formatDemoRecoveryMessage(prompt: DemoResponse['prompts'][number], erro
       ? 'Deep Analysis is the most expensive path, so this failure does not affect the faster visualization flow above.'
       : 'This usually means the selected app had no quick matching data or a tool timed out. The next step will try a simpler path.'
   ].join('\n');
+}
+
+function buildFallbackDemoMessages(result?: DemoResponse, error?: UserError): ChatMessage[] {
+  const reason = result
+    ? result.summary
+    : error?.message
+      ? `The live precheck could not complete: ${error.message}`
+      : 'The live precheck could not confirm that connectors and the LLM are available.';
+  const checks = result?.checks?.length
+    ? `\n\nPrecheck:\n${result.checks.map(check => `- ${check.ok ? 'OK' : 'Needs attention'}: ${check.label} - ${check.detail}`).join('\n')}`
+    : '';
+  return [
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: [
+        '### Rubberband Demo',
+        '',
+        'Rubberband normally runs live analytics through selected MCP apps and renders the resulting visualizations directly in chat.',
+        '',
+        `Live mode is not available right now. ${reason}`,
+        checks,
+        '',
+        'I will switch to a static feature tour so the demo still shows the core experience without requiring connectors or an LLM.'
+      ]
+        .filter(Boolean)
+        .join('\n')
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: [
+        '### Step 1 of 3: Chat becomes an interactive preview',
+        '',
+        'A user asks a plain-language analytics question. Rubberband routes it to selected MCP apps, keeps the operation read-only, and places the visualization in the conversation.'
+      ].join('\n'),
+      toolCalls: [buildFallbackDemoToolCall('workspace')]
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: [
+        '### Step 2 of 3: Apps can show charts, dashboards, and graphs',
+        '',
+        'The same chat surface can host Elastic-style dashboards, Trino or Starburst charts, graph previews, summaries, export, and follow-up analysis.'
+      ].join('\n'),
+      toolCalls: [buildFallbackDemoToolCall('visuals')]
+    },
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: [
+        '### Step 3 of 3: Live mode adds your data',
+        '',
+        'When connectors and the LLM are configured, this same presenter flow runs against real selected apps. Quick visual steps run first, and Deep Analysis stays last for heavier investigation.'
+      ].join('\n'),
+      toolCalls: [buildFallbackDemoToolCall('flow')]
+    }
+  ];
+}
+
+function buildFallbackDemoToolCall(kind: 'workspace' | 'visuals' | 'flow'): RenderableToolCall {
+  return {
+    id: `fallback-demo-${kind}-${crypto.randomUUID()}`,
+    appId: 'rubberband-demo',
+    toolName: `static_${kind}_tour`,
+    toolInput: { fallback: true, kind },
+    toolResult: { content: [{ type: 'text', text: `Static ${kind} demo preview.` }] },
+    resourceUri: `ui://rubberband-demo/${kind}.html`,
+    html: fallbackDemoHtml(kind),
+    title:
+      kind === 'workspace'
+        ? 'Rubberband workspace tour'
+        : kind === 'visuals'
+          ? 'Visualization feature tour'
+          : 'Live demo flow tour'
+  };
+}
+
+function fallbackDemoHtml(kind: 'workspace' | 'visuals' | 'flow') {
+  const content =
+    kind === 'workspace'
+      ? fallbackWorkspaceHtml()
+      : kind === 'visuals'
+        ? fallbackVisualsHtml()
+        : fallbackFlowHtml();
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { color-scheme: light; --ink:#182531; --muted:#5e6c7a; --line:#d7e0ea; --panel:#ffffff; --bg:#f5f8fb; --green:#18a058; --blue:#3478c6; --pink:#d36086; --gold:#b8860b; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: Inter, ui-sans-serif, Segoe UI, Arial, sans-serif; color: var(--ink); background: var(--bg); }
+      main { min-height: 100vh; padding: 22px; display: grid; gap: 14px; }
+      .hero { display: flex; justify-content: space-between; gap: 16px; align-items: end; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+      h1 { margin: 0; font-size: 25px; line-height: 1.1; letter-spacing: 0; }
+      p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+      .badge { border: 1px solid var(--line); background: white; border-radius: 999px; padding: 7px 10px; font-size: 12px; font-weight: 800; color: var(--blue); white-space: nowrap; }
+      .grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 14px; }
+      .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; box-shadow: 0 12px 28px rgba(31, 44, 59, .07); }
+      .card strong { display:block; font-size: 22px; margin-bottom: 4px; }
+      .card span { color: var(--muted); font-size: 12px; font-weight: 700; }
+      .bars { display: flex; align-items: end; height: 230px; gap: 12px; padding: 14px 4px 30px; }
+      .bar { flex: 1; min-height: 36px; height: var(--h); border-radius: 7px 7px 3px 3px; background: linear-gradient(180deg, var(--c), #6b7785); position: relative; }
+      .bar span { position: absolute; left: 50%; bottom: -26px; transform: translateX(-50%); font-size: 11px; color: var(--muted); font-weight: 800; white-space: nowrap; }
+      .lineChart { width: 100%; height: 230px; display: block; }
+      .nodeMap { position: relative; height: 290px; background: linear-gradient(135deg, #f8fbfe, #edf3f8); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+      .node { position: absolute; display: grid; place-items: center; width: 96px; height: 96px; border-radius: 50%; color: white; font-weight: 900; box-shadow: 0 12px 26px rgba(31,44,59,.18); text-align:center; padding: 10px; font-size: 13px; }
+      .edge { position: absolute; height: 3px; background: #9fb0c1; transform-origin: left center; border-radius: 999px; }
+      .n1 { left: 8%; top: 16%; background: var(--blue); } .n2 { left: 42%; top: 9%; background: var(--green); } .n3 { right: 9%; top: 42%; background: var(--pink); } .n4 { left: 31%; bottom: 9%; background: #6f58c9; }
+      .e1 { left: 22%; top: 31%; width: 31%; transform: rotate(-8deg); } .e2 { left: 56%; top: 34%; width: 30%; transform: rotate(26deg); } .e3 { left: 42%; top: 55%; width: 26%; transform: rotate(-42deg); } .e4 { left: 24%; top: 49%; width: 28%; transform: rotate(39deg); }
+      .flow { display: grid; gap: 10px; }
+      .step { display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+      .num { width: 32px; height: 32px; border-radius: 50%; display:grid; place-items:center; background:#e8f2fc; color:var(--blue); font-weight:900; }
+      .step strong { display:block; font-size: 14px; }
+      .step span { color: var(--muted); font-size: 12px; }
+      .mode { font-size: 11px; font-weight: 900; border: 1px solid var(--line); border-radius: 999px; padding: 5px 8px; color: var(--muted); }
+      @media (max-width: 760px) { main { padding: 14px; } .grid, .cards { grid-template-columns: 1fr; } .hero { align-items: start; flex-direction: column; } }
+    </style>
+  </head>
+  <body>${content}</body>
+</html>`;
+}
+
+function fallbackWorkspaceHtml() {
+  return `<main>
+    <div class="hero"><div><h1>Connected Intelligence Workspace</h1><p>One chat surface for MCP apps, live previews, follow-ups, exports, and read-only analytics.</p></div><div class="badge">Static fallback tour</div></div>
+    <div class="cards">
+      <div class="card"><strong>1</strong><span>chat surface</span></div>
+      <div class="card"><strong>4+</strong><span>app families</span></div>
+      <div class="card"><strong>0</strong><span>write operations</span></div>
+    </div>
+    <div class="grid">
+      <section class="panel"><h1>What users see</h1><p>Ask a question, get a visual result, iterate without leaving the conversation.</p><div class="bars"><div class="bar" style="--h:62%;--c:var(--blue)"><span>Ask</span></div><div class="bar" style="--h:88%;--c:var(--green)"><span>Preview</span></div><div class="bar" style="--h:74%;--c:var(--pink)"><span>Refine</span></div><div class="bar" style="--h:54%;--c:var(--gold)"><span>Export</span></div></div></section>
+      <section class="panel"><h1>What Rubberband coordinates</h1><p>LLM chat, MCP app tools, UI resources, history, settings, and bounded analysis.</p><div class="nodeMap"><div class="edge e1"></div><div class="edge e2"></div><div class="edge e3"></div><div class="edge e4"></div><div class="node n1">Chat</div><div class="node n2">MCP Apps</div><div class="node n3">Preview</div><div class="node n4">Export</div></div></section>
+    </div>
+  </main>`;
+}
+
+function fallbackVisualsHtml() {
+  return `<main>
+    <div class="hero"><div><h1>Charts, Dashboards, Graphs</h1><p>Rubberband can host app-generated UI previews alongside normal markdown answers.</p></div><div class="badge">Low effort, high impact</div></div>
+    <div class="grid">
+      <section class="panel"><h1>Demo-ready visual types</h1><p>Simple views tend to be the most reliable live: trend, top-N, status, relationship graph.</p><svg class="lineChart" viewBox="0 0 520 230" role="img" aria-label="Static line chart"><rect x="0" y="0" width="520" height="230" rx="8" fill="#fff"/><g stroke="#d7e0ea"><line x1="42" x2="500" y1="185" y2="185"/><line x1="42" x2="500" y1="135" y2="135"/><line x1="42" x2="500" y1="85" y2="85"/><line x1="42" x2="500" y1="35" y2="35"/></g><polyline fill="none" stroke="#3478c6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" points="42,172 110,144 178,156 246,92 314,108 382,62 470,42"/><polyline fill="none" stroke="#18a058" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" points="42,190 110,182 178,132 246,146 314,96 382,116 470,78"/><g fill="#182531" font-size="12" font-weight="800"><text x="42" y="213">Now</text><text x="418" y="213">Actionable</text></g></svg></section>
+      <section class="panel"><h1>Presenter script</h1><p>Each live step explains what is happening before the tool call, then the preview lands below it.</p><div class="flow"><div class="step"><div class="num">1</div><div><strong>Quick chart</strong><span>Normal MCP chat path</span></div><div class="mode">fast</div></div><div class="step"><div class="num">2</div><div><strong>Graph or dashboard</strong><span>Simple bounded request</span></div><div class="mode">visual</div></div><div class="step"><div class="num">3</div><div><strong>Deep Analysis</strong><span>Heavier synthesis last</span></div><div class="mode">deep</div></div></div></section>
+    </div>
+  </main>`;
+}
+
+function fallbackFlowHtml() {
+  return `<main>
+    <div class="hero"><div><h1>Reliable Demo Flow</h1><p>When live services are configured, the same sequence runs against selected apps. If one step fails, Rubberband explains and continues.</p></div><div class="badge">Graceful recovery</div></div>
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div><strong>Precheck</strong><span>Confirm apps, tools, and live connection settings.</span></div><div class="mode">ready</div></div>
+      <div class="step"><div class="num">2</div><div><strong>Quick visual</strong><span>Small chart or graph first for a reliable first impression.</span></div><div class="mode">normal</div></div>
+      <div class="step"><div class="num">3</div><div><strong>Second angle</strong><span>Show another app or visualization type if available.</span></div><div class="mode">bounded</div></div>
+      <div class="step"><div class="num">4</div><div><strong>Deep Analysis</strong><span>Use the heavier agent path only after the simple visuals have landed.</span></div><div class="mode">last</div></div>
+      <div class="step"><div class="num">5</div><div><strong>Recover</strong><span>Turn tool errors into plain-language presenter notes and continue.</span></div><div class="mode">safe</div></div>
+    </div>
+  </main>`;
 }
 
 function App() {
@@ -903,16 +1056,8 @@ function App() {
       });
       const prompt = result.prompts[0];
       if (!result.ok || !prompt) {
-        setMessages(current => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: formatDemoReadinessMessage(result),
-            followUps: result.prompts.map(item => item.prompt)
-          }
-        ]);
-        setProgressMessage('Demo needs setup');
+        setMessages(current => [...current, ...buildFallbackDemoMessages(result)]);
+        setProgressMessage('Static demo ready');
         return;
       }
 
@@ -962,8 +1107,8 @@ function App() {
       }
       setProgressMessage('Demo complete');
     } catch (err) {
-      setError(toUserError(err));
-      setProgressMessage('Demo failed');
+      setMessages(current => [...current, ...buildFallbackDemoMessages(undefined, toUserError(err))]);
+      setProgressMessage('Static demo ready');
     } finally {
       setDemoRunning(false);
     }
