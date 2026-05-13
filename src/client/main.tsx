@@ -176,6 +176,7 @@ type DemoResponse = {
   }>;
   prompts: Array<{
     label: string;
+    narration: string;
     prompt: string;
     appIds: string[];
     deepAnalysis: boolean;
@@ -329,7 +330,19 @@ type SubmitOptions = {
   cleanupOnAbortMessageId?: string;
   appIds?: string[];
   deepAnalysis?: boolean;
+  suppressError?: boolean;
 };
+
+type SubmitResult =
+  | {
+      ok: true;
+      message: ChatMessage;
+    }
+  | {
+      ok: false;
+      aborted: boolean;
+      error?: UserError;
+    };
 
 type StoredConversation = {
   id: string;
@@ -371,6 +384,39 @@ function formatDemoReadinessMessage(result: DemoResponse) {
     ? `\n\nAvailable demo paths:\n${result.prompts.map(prompt => `- ${prompt.label}`).join('\n')}`
     : '';
   return [`### ${result.title}`, '', result.summary, '', checks, prompts].filter(Boolean).join('\n');
+}
+
+function formatDemoIntroMessage(result: DemoResponse) {
+  const appNames = result.sanity?.demoApps?.length ? `${result.sanity.demoApps.length} selected MCP app${result.sanity.demoApps.length === 1 ? '' : 's'}` : 'the selected MCP apps';
+  const steps = result.prompts.map((prompt, index) => `${index + 1}. ${prompt.label}${prompt.deepAnalysis ? ' (Deep Analysis)' : ''}`).join('\n');
+  return [
+    '### Rubberband Live Demo',
+    '',
+    'Rubberband is a chat workspace for analytics MCP apps. It can discover tools, call them safely in a read-only flow, and render interactive charts or app previews directly inside the conversation.',
+    '',
+    `For this demo I found ${appNames}. I will keep the first steps simple and visual, then use Deep Analysis at the end because it is the heavier path.`,
+    '',
+    'What I will cover:',
+    steps
+  ].join('\n');
+}
+
+function formatDemoStepMessage(prompt: DemoResponse['prompts'][number], index: number, total: number) {
+  const mode = prompt.deepAnalysis ? 'Deep Analysis' : 'normal MCP chat';
+  return [`### Step ${index + 1} of ${total}: ${prompt.label}`, '', prompt.narration, '', `Mode: ${mode}.`].join('\n');
+}
+
+function formatDemoRecoveryMessage(prompt: DemoResponse['prompts'][number], error?: UserError) {
+  const reason = error?.message ? ` The tool path reported: ${error.message}` : '';
+  return [
+    `### ${prompt.label} did not complete`,
+    '',
+    `I will keep the demo moving instead of stopping here.${reason}`,
+    '',
+    prompt.deepAnalysis
+      ? 'Deep Analysis is the most expensive path, so this failure does not affect the faster visualization flow above.'
+      : 'This usually means the selected app had no quick matching data or a tool timed out. The next step will try a simpler path.'
+  ].join('\n');
 }
 
 function App() {
@@ -723,7 +769,7 @@ function App() {
     setVoiceListening(false);
   }
 
-  async function submitMessages(nextMessages: ChatMessage[], options: SubmitOptions = {}) {
+  async function submitMessages(nextMessages: ChatMessage[], options: SubmitOptions = {}): Promise<SubmitResult> {
     activeRequestRef.current?.abort();
     const controller = new AbortController();
     activeRequestRef.current = controller;
@@ -745,26 +791,28 @@ function App() {
           deepAnalysis: options.deepAnalysis ?? deepAnalysis
         })
       });
-      setMessages(current => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: result.content,
-          toolCalls: normalizeRenderableToolCalls(result.toolCalls),
-          followUps: result.followUps || [],
-          usage: normalizeTokenUsage(result.usage)
-        }
-      ]);
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: result.content,
+        toolCalls: normalizeRenderableToolCalls(result.toolCalls),
+        followUps: result.followUps || [],
+        usage: normalizeTokenUsage(result.usage)
+      };
+      setMessages(current => [...current, assistantMessage]);
       await refresh();
+      return { ok: true, message: assistantMessage };
     } catch (err) {
       if (isAbortError(err)) {
         if (options.cleanupOnAbortMessageId) {
           setMessages(current => current.filter(message => message.id !== options.cleanupOnAbortMessageId));
         }
         setProgressMessage('Request canceled');
+        return { ok: false, aborted: true };
       } else {
-        setError(toUserError(err));
+        const userError = toUserError(err);
+        if (!options.suppressError) setError(userError);
+        return { ok: false, aborted: false, error: userError };
       }
     } finally {
       if (activeRequestRef.current === controller) activeRequestRef.current = null;
@@ -868,18 +916,51 @@ function App() {
         return;
       }
 
-      const requestMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'user',
-        content: prompt.prompt,
-        hidden: true
-      };
-      await submitMessages([...messages, requestMessage], {
-        progressMessage: `Running ${prompt.label}`,
-        cleanupOnAbortMessageId: requestMessage.id,
-        appIds: prompt.appIds.length ? prompt.appIds : result.appIds,
-        deepAnalysis: prompt.deepAnalysis
-      });
+      let demoMessages: ChatMessage[] = [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: formatDemoIntroMessage(result)
+        }
+      ];
+      setMessages(demoMessages);
+
+      for (const [index, demoPrompt] of result.prompts.entries()) {
+        const presenterMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: formatDemoStepMessage(demoPrompt, index, result.prompts.length)
+        };
+        const requestMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'user',
+          content: demoPrompt.prompt,
+          hidden: true
+        };
+        demoMessages = [...demoMessages, presenterMessage, requestMessage];
+        const stepResult = await submitMessages(demoMessages, {
+          progressMessage: `Running ${demoPrompt.label}`,
+          cleanupOnAbortMessageId: requestMessage.id,
+          appIds: demoPrompt.appIds.length ? demoPrompt.appIds : result.appIds,
+          deepAnalysis: demoPrompt.deepAnalysis,
+          suppressError: true
+        });
+        if (stepResult.ok) {
+          demoMessages = [...demoMessages, stepResult.message];
+        } else if (stepResult.aborted) {
+          return;
+        } else {
+          const recoveryMessage: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: formatDemoRecoveryMessage(demoPrompt, stepResult.error)
+          };
+          demoMessages = demoMessages.filter(message => message.id !== requestMessage.id).concat(recoveryMessage);
+          setMessages(demoMessages);
+        }
+      }
+      setProgressMessage('Demo complete');
     } catch (err) {
       setError(toUserError(err));
       setProgressMessage('Demo failed');

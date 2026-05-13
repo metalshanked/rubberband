@@ -26,6 +26,7 @@ export type DemoCheck = {
 
 export type DemoPrompt = {
   label: string;
+  narration: string;
   prompt: string;
   appIds: string[];
   deepAnalysis: boolean;
@@ -132,80 +133,104 @@ export function applyDemoConnectionChecks(plan: DemoPlan, connectionChecks: Conn
 
 function buildDemoPrompts(apps: DemoApp[], tools: DemoTool[]): DemoPrompt[] {
   const groups = groupAppsByKind(apps);
-  const prompts: DemoPrompt[] = [];
+  const quickPrompts: DemoPrompt[] = [];
 
   if (groups.security.length) {
-    prompts.push({
-      label: 'Security live triage',
+    quickPrompts.push({
+      label: 'Security snapshot',
+      narration: 'I will start with a simple security snapshot: a live chart of recent activity and the top entities worth looking at.',
       appIds: groups.security.map(app => app.id),
-      deepAnalysis: true,
+      deepAnalysis: false,
       prompt: [
-        'Create a live, read-only security analytics demo using the selected Elastic Security MCP app.',
-        'Discover usable security data first, then generate the best interactive preview you can: severity trends, top affected hosts/users, and a short analyst takeaway.',
-        'Use actual available data and MCP app previews where possible. If the selected data source has no matching records, show the closest useful live security view instead.'
+        'Create a fast, live, read-only security visualization using the selected Elastic Security MCP app.',
+        'Keep it reliable for a demo: choose a readily available security data source, then generate one visually clear interactive chart such as severity over time, top hosts, or top users.',
+        'Use actual available data. Keep the query bounded and include a short presenter-style takeaway.'
       ].join('\n')
     });
   }
 
   if (groups.observability.length) {
-    prompts.push({
-      label: 'Observability live view',
+    quickPrompts.push({
+      label: 'Observability health view',
+      narration: 'Next I will show how Rubberband can turn operational signals into a compact live health view.',
       appIds: groups.observability.map(app => app.id),
-      deepAnalysis: true,
+      deepAnalysis: false,
       prompt: [
-        'Create a live, read-only observability demo using the selected Elastic Observability MCP app.',
-        'Find available logs, metrics, traces, or service data, then produce an interactive preview showing health, trend, and the most useful breakdown.',
-        'Use actual available data and keep the result concise enough to present live.'
+        'Create a fast, live, read-only observability visualization using the selected Elastic Observability MCP app.',
+        'Keep it reliable for a demo: pick available logs, metrics, traces, or service data and generate one simple interactive chart such as event volume, service health, or top error contributors.',
+        'Use actual available data. Keep the query bounded and include a short presenter-style takeaway.'
       ].join('\n')
     });
   }
 
   if (groups.elastic.length) {
-    prompts.push({
-      label: 'Elastic dashboard',
+    quickPrompts.push({
+      label: 'Elastic chart preview',
+      narration: 'Now I will use the Elastic app to create a high-impact chart directly in the chat, using live data rather than a prepared screenshot.',
       appIds: groups.elastic.map(app => app.id),
-      deepAnalysis: true,
+      deepAnalysis: false,
       prompt: [
-        'Create a live, read-only Elastic analytics dashboard demo from the selected app.',
-        'First discover a suitable index, data view, or sample data source, then generate an interactive visualization preview with a time trend and top breakdowns.',
-        'Choose the most visually useful available data; do not invent values.'
+        'Create a fast, live, read-only Elastic visualization demo from the selected app.',
+        'Keep it reliable and visually striking: discover a suitable index, data view, or sample data source, then generate one interactive chart with a time trend or top breakdown.',
+        'Use actual available data. Keep the query bounded and do not invent values.'
       ].join('\n')
     });
   }
 
   const trinoApps = [...groups.trino, ...groups.starburst];
   if (trinoApps.length) {
-    prompts.push({
-      label: 'Warehouse analytics',
+    quickPrompts.push({
+      label: 'Warehouse chart or graph',
+      narration: 'Then I will use the warehouse app to show a simple chart or relationship graph from queryable metadata or data.',
       appIds: trinoApps.map(app => app.id),
-      deepAnalysis: true,
+      deepAnalysis: false,
       prompt: [
-        'Create a live, read-only Trino or Starburst analytics demo from the selected MCP app.',
-        'Discover accessible catalogs and tables, pick a table or relationship that can produce a useful chart or graph, and generate an interactive visualization preview.',
-        'Use actual queryable data or metadata only, and keep the query bounded for a live demo.'
+        'Create a fast, live, read-only Trino or Starburst visualization demo from the selected MCP app.',
+        'Keep it reliable and visually striking: discover accessible catalogs and tables, then generate one simple interactive chart or small relationship graph from queryable data or metadata.',
+        'Use actual queryable data or metadata only. Keep the query bounded for a live demo.'
       ].join('\n')
     });
   }
 
-  const usedAppIds = new Set(prompts.flatMap(prompt => prompt.appIds));
+  const usedAppIds = new Set(quickPrompts.flatMap(prompt => prompt.appIds));
   const genericApps = groups.generic.filter(app => !usedAppIds.has(app.id));
-  if (!prompts.length && genericApps.length) {
-    prompts.push({
+  if (!quickPrompts.length && genericApps.length) {
+    quickPrompts.push({
       label: 'MCP app preview',
+      narration: 'I will use the selected MCP app to show the best live preview it can safely produce.',
       appIds: genericApps.map(app => app.id),
-      deepAnalysis: true,
+      deepAnalysis: false,
       prompt: [
-        'Create a live, read-only Rubberband demo using the selected MCP app.',
-        'Discover what the app can safely show, then generate the best interactive preview or concise analysis available from live tools.',
+        'Create a fast, live, read-only Rubberband demo using the selected MCP app.',
+        'Discover what the app can safely show, then generate one simple interactive preview or concise analysis from live tools.',
         'Do not invent data.'
       ].join('\n')
     });
   }
 
-  return prompts
+  const usableQuickPrompts = quickPrompts
     .map(prompt => ({ ...prompt, appIds: prompt.appIds.filter(appId => tools.some(tool => tool.appId === appId)) }))
     .filter(prompt => prompt.appIds.length > 0)
-    .slice(0, 4);
+    .slice(0, 2);
+  const quickAppIds = [...new Set(usableQuickPrompts.flatMap(prompt => prompt.appIds))];
+  const deepPrompt =
+    quickAppIds.length > 0
+      ? [
+          {
+            label: 'Deep Analysis wrap-up',
+            narration: 'Finally I will switch on Deep Analysis for a heavier read-only pass that connects what we saw and suggests the next useful investigation.',
+            appIds: quickAppIds,
+            deepAnalysis: true,
+            prompt: [
+              'Run a bounded read-only Deep Analysis wrap-up for this Rubberband demo.',
+              'Use the selected MCP apps to connect the live signals already explored, summarize what matters, and suggest one or two next questions.',
+              'Keep this final step concise. Prefer existing previews or small bounded tool calls over broad discovery.'
+            ].join('\n')
+          }
+        ]
+      : [];
+
+  return [...usableQuickPrompts, ...deepPrompt];
 }
 
 function groupAppsByKind(apps: DemoApp[]) {

@@ -994,8 +994,9 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
         prompts: [
           {
             label: 'Elastic dashboard',
+            narration: 'I will start with a simple live chart that is easy to explain.',
             appIds: ['dashbuilder', 'mcp-app-trino'],
-            deepAnalysis: true,
+            deepAnalysis: false,
             prompt: 'Create a live, read-only Elastic analytics dashboard demo from the selected app. Use actual available data and generate an interactive preview.'
           }
         ],
@@ -1034,12 +1035,14 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
 
   await expect(page.getByText('Run the one-click Rubberband live demo.')).toHaveCount(0);
   await expect(page.getByText('Canned Questions')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Rubberband Live Demo' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Step 1 of 1: Elastic dashboard' })).toBeVisible();
   await expect(page.getByText('Live data demo preview ready.')).toBeVisible();
   await expect(page.getByText('Elastic live preview')).toBeVisible();
   await expect(page.getByLabel('Suggested follow-up questions')).toBeVisible();
   expect(demoBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
   expect(chatBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
-  expect(chatBody?.deepAnalysis).toBe(true);
+  expect(chatBody?.deepAnalysis).toBe(false);
   expect(chatBody?.messages?.at(-1)?.content).toContain('Use actual available data');
 });
 

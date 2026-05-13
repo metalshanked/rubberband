@@ -232,7 +232,9 @@ test('demo planner creates public live-data prompts for selected MCP apps', () =
   assert.equal(plan.status, 'ready');
   assert.deepEqual(plan.appIds, ['dashbuilder', 'mcp-app-trino']);
   assert.ok(plan.prompts.length >= 2);
-  assert.ok(plan.prompts.every(prompt => prompt.deepAnalysis));
+  assert.equal(plan.prompts.at(-1)?.deepAnalysis, true);
+  assert.ok(plan.prompts.slice(0, -1).every(prompt => !prompt.deepAnalysis));
+  assert.ok(plan.prompts.every(prompt => prompt.narration.length > 20));
   assert.match(plan.prompts.map(prompt => prompt.prompt).join('\n'), /actual available data|actual queryable data/i);
   assert.doesNotMatch(JSON.stringify(plan), /canned|fake|placeholder|internal/i);
 });
