@@ -1891,6 +1891,13 @@ input {
   border-radius: 8px;
 }
 
+.simpleError {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .explainedError {
   display: grid;
   gap: 10px;
@@ -1899,11 +1906,19 @@ input {
 
 .explainedErrorHeader {
   display: flex;
+  justify-content: space-between;
   align-items: flex-start;
   gap: 9px;
 }
 
-.explainedErrorHeader div {
+.explainedErrorTitle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.explainedErrorTitle div {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -1963,6 +1978,24 @@ input {
   overflow-wrap: anywhere;
   color: #7f1d1d;
   white-space: pre-wrap;
+}
+
+.errorDismiss {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: -3px -4px 0 0;
+  color: #8f1f1f;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.errorDismiss:hover {
+  background: rgba(180, 35, 24, 0.1);
 }
 
 .errorText {

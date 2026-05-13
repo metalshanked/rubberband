@@ -1315,6 +1315,7 @@ function App() {
     if (busy) return;
     const conversation = createConversation();
     stopVoiceInput();
+    setError(null);
     setDraft('');
     setPendingAttachments([]);
     setConversationId(conversation.id);
@@ -1330,6 +1331,7 @@ function App() {
     const conversation = conversationHistory.find(item => item.id === id);
     if (!conversation) return;
     stopVoiceInput();
+    setError(null);
     setDraft('');
     setPendingAttachments([]);
     setConversationId(conversation.id);
@@ -1787,7 +1789,7 @@ function App() {
           <div ref={bottomRef} />
         </div>
 
-        {error ? <ErrorExplainer error={error} /> : null}
+        {error ? <ErrorExplainer error={error} onDismiss={() => setError(null)} /> : null}
 
         <div className="composer" onDragOver={event => event.preventDefault()} onDrop={handleComposerDrop}>
           <input
@@ -3315,20 +3317,32 @@ function StatusBadge({ status }: { status: AppInfo['status'] }) {
   return <span className={`status ${status}`}>{status}</span>;
 }
 
-function ErrorExplainer({ error }: { error: UserError }) {
+function ErrorExplainer({ error, onDismiss }: { error: UserError; onDismiss: () => void }) {
   const explanation = error.explanation;
   if (!explanation) {
-    return <div className="errorBar">{error.message}</div>;
+    return (
+      <div className="errorBar simpleError" role="alert">
+        <span>{error.message}</span>
+        <button className="errorDismiss" onClick={onDismiss} type="button" title="Dismiss error" aria-label="Dismiss error">
+          <X size={14} />
+        </button>
+      </div>
+    );
   }
 
   return (
     <section className="errorBar explainedError" aria-label="Failure explanation">
       <div className="explainedErrorHeader">
-        <ShieldAlert size={17} />
-        <div>
-          <strong>{explanation.headline || error.message}</strong>
-          <span>{explanation.generatedBy === 'llm' ? 'Explained with sanitized LLM context' : 'Explained locally'}</span>
+        <div className="explainedErrorTitle">
+          <ShieldAlert size={17} />
+          <div>
+            <strong>{explanation.headline || error.message}</strong>
+            <span>{explanation.generatedBy === 'llm' ? 'Explained with sanitized LLM context' : 'Explained locally'}</span>
+          </div>
         </div>
+        <button className="errorDismiss" onClick={onDismiss} type="button" title="Dismiss error" aria-label="Dismiss error">
+          <X size={14} />
+        </button>
       </div>
       <p>{explanation.whatHappened}</p>
       <div className="explainedErrorGrid">

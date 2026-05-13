@@ -113,6 +113,40 @@ test('shows layman RCA and fix guidance for failed requests', async ({ page }) =
   await expect(page.getByText(/specific catalog or schema/)).toBeVisible();
 });
 
+test('dismisses failed request banners and clears them on new chat', async ({ page }) => {
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: 'The request took too long and was stopped.',
+        technicalError: 'MCP error -32001: Request timed out',
+        explanation: {
+          headline: 'The request took too long and was stopped.',
+          whatHappened: 'Rubberband waited for the selected MCP tool, but it did not finish before the timeout.',
+          likelyCauses: ['The tool tried to inspect too much metadata at once.'],
+          suggestedFixes: ['Try a narrower request with a specific catalog or schema.'],
+          technicalSummary: 'MCP error -32001: Request timed out',
+          generatedBy: 'local'
+        }
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show all trino catalogs');
+  await page.getByTitle('Send').click();
+  await expect(page.getByLabel('Failure explanation')).toBeVisible();
+  await page.getByRole('button', { name: 'Dismiss error' }).click();
+  await expect(page.getByLabel('Failure explanation')).toHaveCount(0);
+
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show all trino catalogs again');
+  await page.getByTitle('Send').click();
+  await expect(page.getByLabel('Failure explanation')).toBeVisible();
+  await page.getByRole('button', { name: 'New chat' }).click();
+  await expect(page.getByLabel('Failure explanation')).toHaveCount(0);
+});
+
 test('renders clickable suggested follow-up questions', async ({ page }) => {
   let latestChatBody: { messages?: Array<{ content: string }> } | undefined;
   let count = 0;
