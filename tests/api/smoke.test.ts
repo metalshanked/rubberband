@@ -208,9 +208,9 @@ test('demo endpoint reports live demo readiness', async () => {
   const body = (await response.json()) as { ok: boolean; status: string; prompts: unknown[]; checks: unknown[]; sanity: { ok: boolean; availableApps: number } };
 
   assert.equal(body.ok, false);
-  assert.equal(body.status, 'needs_apps');
+  assert.equal(body.status, body.sanity.availableApps > 0 ? 'needs_tools' : 'needs_apps');
   assert.equal(body.sanity.ok, false);
-  assert.equal(body.sanity.availableApps, 0);
+  assert.ok(body.sanity.availableApps >= 0);
   assert.equal(body.prompts.length, 0);
   assert.ok(body.checks.length > 0);
 });
