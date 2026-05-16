@@ -7,6 +7,20 @@ export type TrinoProfileOptions = {
   maxColumnsPerCatalog?: number;
 };
 
+export type TrinoFocusTable = {
+  schema: string;
+  name: string;
+  type: string;
+};
+
+export type TrinoFocusPage<T> = {
+  items: T[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  total?: number;
+};
+
 type TrinoProfileCacheEntry = {
   expiresAt: number;
   profile: TrinoProfile;
@@ -175,6 +189,70 @@ export async function buildTrinoProfile(settings: SettingsAccess, options: Trino
     trinoProfileCache.set(cacheKey, { expiresAt: Date.now() + cacheTtlMs, profile: cloneProfile(profile) });
   }
   return { ...profile, cache: { hit: false, ttlMs: cacheTtlMs } };
+}
+
+export async function listTrinoFocusCatalogs(settings: SettingsAccess, query = '', limit = 50, offset = 0) {
+  const client = createTrinoClient(settings);
+  const boundedLimit = clampNumber(limit, 1, 200, 50);
+  const boundedOffset = Math.max(0, Math.trunc(offset));
+  const normalizedQuery = query.trim().toLowerCase();
+  const rows = await client.query('SHOW CATALOGS');
+  const catalogs = rows
+    .map(row => String(row[0] || ''))
+    .filter(catalog => catalog && (!normalizedQuery || catalog.toLowerCase().includes(normalizedQuery)))
+    .sort((a, b) => a.localeCompare(b));
+  return {
+    connectionLabel: client.connectionLabel,
+    catalogs: catalogs.slice(boundedOffset, boundedOffset + boundedLimit),
+    limit: boundedLimit,
+    offset: boundedOffset,
+    hasMore: boundedOffset + boundedLimit < catalogs.length,
+    total: catalogs.length
+  };
+}
+
+export async function listTrinoFocusSchemas(settings: SettingsAccess, catalog: string, query = '', limit = 50, offset = 0) {
+  const client = createTrinoClient(settings);
+  const boundedLimit = clampNumber(limit, 1, 200, 50);
+  const boundedOffset = Math.max(0, Math.trunc(offset));
+  const schemaFilter = query.trim() ? `AND lower(schema_name) LIKE lower(${quoteLiteral(`%${escapeLike(query.trim())}%`)}) ESCAPE '\\'` : '';
+  const rows = await client.query(
+    [
+      'SELECT schema_name',
+      `FROM ${quoteIdentifier(catalog)}.information_schema.schemata`,
+      "WHERE schema_name <> 'information_schema'",
+      schemaFilter,
+      'ORDER BY schema_name',
+      `OFFSET ${boundedOffset}`,
+      `LIMIT ${boundedLimit + 1}`
+    ].join(' ')
+  );
+  const schemas = rows.map(row => String(row[0] || '')).filter(Boolean);
+  return { catalog, schemas: schemas.slice(0, boundedLimit), limit: boundedLimit, offset: boundedOffset, hasMore: schemas.length > boundedLimit };
+}
+
+export async function listTrinoFocusTables(settings: SettingsAccess, catalog: string, schema: string, query = '', limit = 50, offset = 0) {
+  const client = createTrinoClient(settings);
+  const boundedLimit = clampNumber(limit, 1, 200, 50);
+  const boundedOffset = Math.max(0, Math.trunc(offset));
+  const tableFilter = query.trim() ? `AND lower(table_name) LIKE lower(${quoteLiteral(`%${escapeLike(query.trim())}%`)}) ESCAPE '\\'` : '';
+  const rows = await client.query(
+    [
+      'SELECT table_schema, table_name, table_type',
+      `FROM ${quoteIdentifier(catalog)}.information_schema.tables`,
+      `WHERE table_schema = ${quoteLiteral(schema)}`,
+      tableFilter,
+      'ORDER BY table_name',
+      `OFFSET ${boundedOffset}`,
+      `LIMIT ${boundedLimit + 1}`
+    ].join(' ')
+  );
+  const tables: TrinoFocusTable[] = rows.map(row => ({
+    schema: String(row[0] || ''),
+    name: String(row[1] || ''),
+    type: String(row[2] || 'TABLE')
+  })).filter(table => table.schema && table.name);
+  return { catalog, schema, tables: tables.slice(0, boundedLimit), limit: boundedLimit, offset: boundedOffset, hasMore: tables.length > boundedLimit };
 }
 
 export function renderTrinoProfile(profile: TrinoProfile) {
@@ -505,6 +583,10 @@ function quoteIdentifier(value: string) {
 
 function quoteLiteral(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function escapeLike(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
 }
 
 function readSettingNumber(settings: Pick<SettingsAccess, 'get'>, key: string, fallback: number) {

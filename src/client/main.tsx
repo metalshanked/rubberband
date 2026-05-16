@@ -35,11 +35,14 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Send,
   Settings,
   ShieldAlert,
   Sparkles,
   Table2,
+  Target,
+  Wrench,
   Trash2,
   ZoomIn,
   ZoomOut,
@@ -318,6 +321,64 @@ type ConnectionTestResult = {
   details?: Record<string, string | number | boolean>;
 };
 
+type FocusTarget =
+  | {
+      id: string;
+      source: 'trino';
+      catalog?: string;
+      schema?: string;
+      table?: string;
+      tableType?: string;
+      label: string;
+    }
+  | {
+      id: string;
+      source: 'elastic';
+      indexPattern: string;
+      kind?: string;
+      label: string;
+    };
+
+type TrinoFocusCatalogResponse = {
+  connectionLabel: string;
+  catalogs: string[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  total?: number;
+};
+
+type TrinoFocusSchemaResponse = {
+  catalog: string;
+  schemas: string[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+};
+
+type TrinoFocusTableResponse = {
+  catalog: string;
+  schema: string;
+  tables: Array<{
+    schema: string;
+    name: string;
+    type: string;
+  }>;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+};
+
+type ElasticFocusSearchResponse = {
+  targets: Array<{
+    name: string;
+    kind: string;
+    docs?: number;
+    health?: string;
+    backingIndices?: number;
+  }>;
+};
+
 type ServerProgressEvent = {
   id: number;
   at: string;
@@ -367,6 +428,7 @@ const CHAT_HISTORY_KEY = 'rubberband.chatHistory.v1';
 const ACTIVE_CONVERSATION_KEY = 'rubberband.activeConversationId.v1';
 const SIDEBAR_COLLAPSED_KEY = 'rubberband.sidebarCollapsed.v1';
 const SELECTED_MCP_APPS_KEY = 'rubberband.selectedMcpApps.v1';
+const FOCUS_TARGETS_KEY = 'rubberband.focusTargets.v1';
 const DEFAULT_INTRO_MESSAGE = 'Ask for a dashboard, SQL chart, Elastic/Kibana workflow, or Trino/Starburst analytics preview.';
 const MAX_STORED_CONVERSATIONS = 24;
 const HISTORY_STORAGE_FULL_NOTICE = 'Browser history storage is full. Current chat still works, but new history may not be saved. Clear all history to recover.';
@@ -375,6 +437,7 @@ const MAX_VIZ_INTERACTIONS_FOR_CONTEXT = 6;
 const MAX_CHAT_ATTACHMENTS = 4;
 const MAX_CHAT_ATTACHMENT_BYTES = 5_000_000;
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
+const FOCUS_PAGE_SIZE = 50;
 
 function formatDemoIntroMessage(result: DemoResponse) {
   const appNames = result.sanity?.demoApps?.length ? `${result.sanity.demoApps.length} selected MCP app${result.sanity.demoApps.length === 1 ? '' : 's'}` : 'the selected MCP apps';
@@ -613,6 +676,7 @@ function fallbackFlowHtml() {
 function App() {
   const initialChatState = useMemo(() => loadChatState(), []);
   const initialSelectedAppIds = useMemo(() => loadSelectedMcpAppIds(), []);
+  const initialFocusTargets = useMemo(() => loadFocusTargets(), []);
   const [chatScale, setChatScale] = useState(() => {
     const raw = window.localStorage.getItem('rubberband.chatScale');
     const saved = raw === null ? NaN : Number(raw);
@@ -621,6 +685,7 @@ function App() {
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [selectedAppIds, setSelectedAppIds] = useState<string[]>(initialSelectedAppIds || []);
   const [tools, setTools] = useState<McpTool[]>([]);
+  const [focusTargets, setFocusTargets] = useState<FocusTarget[]>(initialFocusTargets);
   const [selectedToolKey, setSelectedToolKey] = useState<string | null>(null);
   const [toolArgsDraft, setToolArgsDraft] = useState('{}');
   const [toolRunResult, setToolRunResult] = useState<string | null>(null);
@@ -730,6 +795,10 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    persistFocusTargets(focusTargets);
+  }, [focusTargets]);
 
   useEffect(() => {
     setProgressExpanded(false);
@@ -979,7 +1048,25 @@ function App() {
             content: messageContentForModel(message)
           })),
           appIds: options.appIds ?? selectedAppIds,
-          deepAnalysis: options.deepAnalysis ?? deepAnalysis
+          deepAnalysis: options.deepAnalysis ?? deepAnalysis,
+          focusTargets: focusTargets.map(target => {
+            if (target.source === 'trino') {
+              return {
+                source: 'trino',
+                catalog: target.catalog,
+                schema: target.schema,
+                table: target.table,
+                tableType: target.tableType,
+                label: target.label
+              };
+            }
+            return {
+              source: 'elastic',
+              indexPattern: target.indexPattern,
+              kind: target.kind,
+              label: target.label
+            };
+          })
         })
       });
       const assistantMessage: ChatMessage = {
@@ -1302,6 +1389,18 @@ function App() {
     setSettingsNotice(null);
   }
 
+  function addFocusTarget(target: FocusTarget) {
+    setFocusTargets(current => {
+      const dedupeKey = focusTargetKey(target);
+      const next = [target, ...current.filter(item => focusTargetKey(item) !== dedupeKey)].slice(0, 12);
+      return next;
+    });
+  }
+
+  function removeFocusTarget(id: string) {
+    setFocusTargets(current => current.filter(target => target.id !== id));
+  }
+
   function toggleSelectedApp(appId: string) {
     setSelectedAppIds(current => {
       const next = current.includes(appId) ? current.filter(id => id !== appId) : [...current, appId];
@@ -1600,7 +1699,7 @@ function App() {
         <section className="sideSection toolsSection">
           <button className="sectionTitle sectionButton" onClick={() => (sidebarCollapsed ? setSidebarCollapsed(false) : toggleSection('tools'))} title={sidebarCollapsed ? 'Expand tools' : 'Toggle tools'}>
             {!sidebarCollapsed ? (collapsedSections.tools ? <ChevronRight size={15} /> : <ChevronDown size={15} />) : null}
-            <Settings size={15} />
+            <Wrench size={15} />
             <span>Tools</span>
             {!sidebarCollapsed ? <em>{selectedToolCount || tools.length}</em> : null}
           </button>
@@ -1691,8 +1790,11 @@ function App() {
 
       <main className="chatPane">
         <div className="topbar">
-          <p className="chatContext">{selectedAppSummary()}</p>
+          <div className="topbarContext">
+            <p className="chatContext">{selectedAppSummary()}</p>
+          </div>
           <div className="topbarActions">
+            <FocusMenu targets={focusTargets} onAddTarget={addFocusTarget} onRemoveTarget={removeFocusTarget} />
             <button className="demoButton" onClick={runLiveDemo} disabled={busy || demoRunning} title="Run live demo" aria-label="Run live demo">
               {demoRunning ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
               <span>Demo</span>
@@ -1900,6 +2002,411 @@ function App() {
         />
       ) : null}
     </div>
+  );
+}
+
+function FocusMenu({
+  targets,
+  onAddTarget,
+  onRemoveTarget
+}: {
+  targets: FocusTarget[];
+  onAddTarget: (target: FocusTarget) => void;
+  onRemoveTarget: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [source, setSource] = useState<'trino' | 'elastic'>('trino');
+  const [catalogs, setCatalogs] = useState<string[]>([]);
+  const [schemas, setSchemas] = useState<string[]>([]);
+  const [tables, setTables] = useState<TrinoFocusTableResponse['tables']>([]);
+  const [catalogQuery, setCatalogQuery] = useState('');
+  const [schemaQuery, setSchemaQuery] = useState('');
+  const [tableQuery, setTableQuery] = useState('');
+  const [selectedCatalog, setSelectedCatalog] = useState('');
+  const [selectedSchema, setSelectedSchema] = useState('');
+  const [selectedTable, setSelectedTable] = useState('');
+  const [catalogHasMore, setCatalogHasMore] = useState(false);
+  const [schemaHasMore, setSchemaHasMore] = useState(false);
+  const [tableHasMore, setTableHasMore] = useState(false);
+  const [elasticQuery, setElasticQuery] = useState('');
+  const [elasticResults, setElasticResults] = useState<ElasticFocusSearchResponse['targets']>([]);
+  const [loading, setLoading] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || source !== 'trino') return undefined;
+    const timer = window.setTimeout(() => {
+      void loadCatalogs(catalogQuery, 0, false);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [open, source, catalogQuery]);
+
+  useEffect(() => {
+    setSelectedSchema('');
+    setSelectedTable('');
+    setSchemaQuery('');
+    setTableQuery('');
+    setSchemas([]);
+    setTables([]);
+  }, [selectedCatalog]);
+
+  useEffect(() => {
+    if (!open || source !== 'trino' || !selectedCatalog) return undefined;
+    const timer = window.setTimeout(() => {
+      void loadSchemas(selectedCatalog, schemaQuery, 0, false);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [open, source, selectedCatalog, schemaQuery]);
+
+  useEffect(() => {
+    setSelectedTable('');
+    setTableQuery('');
+    setTables([]);
+  }, [selectedSchema]);
+
+  useEffect(() => {
+    if (!open || source !== 'trino' || !selectedCatalog || !selectedSchema) return undefined;
+    const timer = window.setTimeout(() => {
+      void loadTables(selectedCatalog, selectedSchema, tableQuery, 0, false);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [open, source, selectedCatalog, selectedSchema, tableQuery]);
+
+  useEffect(() => {
+    if (!open || source !== 'elastic') return undefined;
+    const query = elasticQuery.trim();
+    if (!query) {
+      setElasticResults([]);
+      setNotice(null);
+      return undefined;
+    }
+    if (query.length < 2 && !/[*?:]/.test(query)) {
+      setElasticResults([]);
+      setNotice(null);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      void searchElastic(query);
+    }, 240);
+    return () => window.clearTimeout(timer);
+  }, [open, source, elasticQuery]);
+
+  async function loadCatalogs(query = catalogQuery, offset = 0, append = false) {
+    setLoading('catalogs');
+    setNotice(null);
+    try {
+      const result = await api<TrinoFocusCatalogResponse>(`/api/focus/trino/catalogs?q=${encodeURIComponent(query)}&limit=${FOCUS_PAGE_SIZE}&offset=${offset}`);
+      setCatalogs(current => (append ? mergeUniqueStrings(current, result.catalogs) : result.catalogs));
+      setCatalogHasMore(result.hasMore);
+    } catch (err) {
+      setNotice(formatErrorForInline(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function loadSchemas(catalog: string, query = schemaQuery, offset = 0, append = false) {
+    setLoading('schemas');
+    setNotice(null);
+    try {
+      const result = await api<TrinoFocusSchemaResponse>(`/api/focus/trino/schemas?catalog=${encodeURIComponent(catalog)}&q=${encodeURIComponent(query)}&limit=${FOCUS_PAGE_SIZE}&offset=${offset}`);
+      setSchemas(current => (append ? mergeUniqueStrings(current, result.schemas) : result.schemas));
+      setSchemaHasMore(result.hasMore);
+    } catch (err) {
+      setNotice(formatErrorForInline(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function loadTables(catalog: string, schema: string, query = tableQuery, offset = 0, append = false) {
+    setLoading('tables');
+    setNotice(null);
+    try {
+      const result = await api<TrinoFocusTableResponse>(`/api/focus/trino/tables?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&q=${encodeURIComponent(query)}&limit=${FOCUS_PAGE_SIZE}&offset=${offset}`);
+      setTables(current => (append ? mergeUniqueTables(current, result.tables) : result.tables));
+      setTableHasMore(result.hasMore);
+    } catch (err) {
+      setNotice(formatErrorForInline(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function searchElastic(query = elasticQuery.trim()) {
+    if (!query) return;
+    setLoading('elastic');
+    setNotice(null);
+    try {
+      const result = await api<ElasticFocusSearchResponse>(`/api/focus/elastic/search?query=${encodeURIComponent(query)}&limit=50`);
+      setElasticResults(result.targets);
+      if (!result.targets.length) setNotice('No matches.');
+    } catch (err) {
+      setNotice(formatErrorForInline(err));
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  function addTrinoTarget() {
+    const table = tables.find(item => item.name === selectedTable);
+    const target: FocusTarget = {
+      id: crypto.randomUUID(),
+      source: 'trino',
+      catalog: selectedCatalog || undefined,
+      schema: selectedSchema || undefined,
+      table: selectedTable || undefined,
+      tableType: table?.type,
+      label: formatTrinoFocusLabel(selectedCatalog, selectedSchema, selectedTable, table?.type)
+    };
+    onAddTarget(target);
+  }
+
+  function addElasticTarget(target: ElasticFocusSearchResponse['targets'][number]) {
+    onAddTarget({
+      id: crypto.randomUUID(),
+      source: 'elastic',
+      indexPattern: target.name,
+      kind: target.kind,
+      label: target.name
+    });
+  }
+
+  function addElasticPattern() {
+    const pattern = elasticQuery.trim();
+    if (!pattern) return;
+    onAddTarget({
+      id: crypto.randomUUID(),
+      source: 'elastic',
+      indexPattern: pattern,
+      kind: /[*?]/.test(pattern) ? 'index_pattern' : 'index',
+      label: pattern
+    });
+  }
+
+  return (
+    <div className="focusMenu" ref={rootRef}>
+      <button
+        className={`focusButton ${targets.length ? 'active' : ''}`}
+        type="button"
+        onClick={() => setOpen(value => !value)}
+        title="Focus analysis targets"
+        aria-label="Focus analysis targets"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <Target size={15} />
+        <span>Focus</span>
+        {targets.length ? <em>{targets.length}</em> : null}
+        <ChevronDown size={13} />
+      </button>
+      {open ? (
+        <div className="focusPanel" role="dialog" aria-label="Focus analysis targets">
+          <div className="focusTabs" role="tablist" aria-label="Focus source">
+            <button type="button" className={source === 'trino' ? 'active' : ''} onClick={() => setSource('trino')}>
+              <Table2 size={14} />
+              <span>Trino</span>
+            </button>
+            <button type="button" className={source === 'elastic' ? 'active' : ''} onClick={() => setSource('elastic')}>
+              <Database size={14} />
+              <span>Elastic</span>
+            </button>
+          </div>
+          {source === 'trino' ? (
+            <div className="focusPicker">
+              <FocusLookupField
+                label="Catalog"
+                placeholder="Search or browse catalogs"
+                query={catalogQuery}
+                selected={selectedCatalog}
+                options={catalogs.map(catalog => ({ value: catalog, label: catalog }))}
+                loading={loading === 'catalogs'}
+                hasMore={catalogHasMore}
+                onQueryChange={setCatalogQuery}
+                onSelect={value => {
+                  setSelectedCatalog(value);
+                  setCatalogQuery(value);
+                }}
+                onLoadMore={() => void loadCatalogs(catalogQuery, catalogs.length, true)}
+              />
+              <FocusLookupField
+                label="Schema"
+                placeholder={selectedCatalog ? 'Search or browse schemas' : 'Select catalog first'}
+                query={schemaQuery}
+                selected={selectedSchema}
+                disabled={!selectedCatalog}
+                options={schemas.map(schema => ({ value: schema, label: schema }))}
+                loading={loading === 'schemas'}
+                hasMore={schemaHasMore}
+                onQueryChange={setSchemaQuery}
+                onSelect={value => {
+                  setSelectedSchema(value);
+                  setSchemaQuery(value);
+                }}
+                onLoadMore={() => void loadSchemas(selectedCatalog, schemaQuery, schemas.length, true)}
+              />
+              <FocusLookupField
+                label="Table/View"
+                placeholder={selectedSchema ? 'Search or browse tables/views' : 'Select schema first'}
+                query={tableQuery}
+                selected={selectedTable}
+                disabled={!selectedSchema}
+                options={tables.map(table => ({ value: table.name, label: table.name, meta: table.type }))}
+                loading={loading === 'tables'}
+                hasMore={tableHasMore}
+                onQueryChange={setTableQuery}
+                onSelect={value => {
+                  setSelectedTable(value);
+                  setTableQuery(value);
+                }}
+                onLoadMore={() => void loadTables(selectedCatalog, selectedSchema, tableQuery, tables.length, true)}
+              />
+              <div className="focusPanelActions">
+                <button type="button" onClick={() => void loadCatalogs(catalogQuery, 0, false)} disabled={loading !== null} title="Refresh Trino catalogs" aria-label="Refresh Trino catalogs">
+                  {loading === 'catalogs' ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+                </button>
+                <button type="button" className="focusAddButton" onClick={addTrinoTarget}>
+                  <Plus size={14} />
+                  <span>Add</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="focusPicker">
+              <div className="focusSearch">
+                <input
+                  value={elasticQuery}
+                  onChange={event => setElasticQuery(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void searchElastic();
+                    }
+                  }}
+                  placeholder="Index or pattern"
+                  aria-label="Elastic index search"
+                />
+                <button type="button" onClick={() => void searchElastic()} disabled={loading === 'elastic' || !elasticQuery.trim()} title="Search indices" aria-label="Search indices">
+                  {loading === 'elastic' ? <Loader2 className="spin" size={14} /> : <Search size={14} />}
+                </button>
+              </div>
+              {!elasticQuery.trim() ? <div className="focusHint">Type 2+ chars, a wildcard, or an exact index pattern.</div> : null}
+              <div className="focusResultList">
+                {elasticQuery.trim() ? (
+                  <button type="button" className="focusPatternResult" onClick={addElasticPattern} title={`Use ${elasticQuery.trim()} as an Elastic target`}>
+                    <Target size={14} />
+                    <span>
+                      <strong>Use pattern</strong>
+                      <small>{elasticQuery.trim()}</small>
+                    </span>
+                    <em>{/[*?]/.test(elasticQuery.trim()) ? 'pattern' : 'exact'}</em>
+                  </button>
+                ) : null}
+                {elasticResults.map(result => (
+                  <button type="button" key={`${result.kind}:${result.name}`} onClick={() => addElasticTarget(result)} title={`Add ${result.name}`}>
+                    <Database size={14} />
+                    <span>{result.name}</span>
+                    <em>{result.kind}</em>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {targets.length ? (
+            <div className="focusTargets" aria-label="Selected focus targets">
+              {targets.map(target => (
+                <span className="focusChip" key={target.id} title={target.label}>
+                  {target.source === 'trino' ? <Table2 size={12} /> : <Database size={12} />}
+                  <span>{target.label}</span>
+                  <button type="button" onClick={() => onRemoveTarget(target.id)} title={`Remove ${target.label}`} aria-label={`Remove ${target.label}`}>
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {notice ? <div className="focusNotice">{notice}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FocusLookupField({
+  label,
+  placeholder,
+  query,
+  selected,
+  options,
+  disabled = false,
+  loading,
+  hasMore,
+  onQueryChange,
+  onSelect,
+  onLoadMore
+}: {
+  label: string;
+  placeholder: string;
+  query: string;
+  selected: string;
+  options: Array<{ value: string; label: string; meta?: string }>;
+  disabled?: boolean;
+  loading: boolean;
+  hasMore: boolean;
+  onQueryChange: (value: string) => void;
+  onSelect: (value: string) => void;
+  onLoadMore: () => void;
+}) {
+  return (
+    <label className="focusLookup">
+      <span>{label}</span>
+      <div className="focusLookupBody">
+        <input
+          value={query}
+          onChange={event => onQueryChange(event.target.value)}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-label={`${label} search`}
+        />
+        <div className="focusOptionList" aria-label={`${label} matches`}>
+          <button type="button" className={!selected ? 'selected' : ''} onClick={() => onSelect('')} disabled={disabled}>
+            <Check size={13} aria-hidden="true" />
+            <span>Auto</span>
+            <em>default</em>
+          </button>
+          {options.map(option => (
+            <button
+              type="button"
+              className={selected === option.value ? 'selected' : ''}
+              onClick={() => onSelect(option.value)}
+              disabled={disabled}
+              title={option.label}
+              key={option.value}
+            >
+              <Check size={13} aria-hidden="true" />
+              <span>{option.label}</span>
+              {option.meta ? <em>{option.meta}</em> : null}
+            </button>
+          ))}
+          {hasMore ? (
+            <button type="button" className="focusLoadMore" onClick={onLoadMore} disabled={disabled || loading}>
+              {loading ? <Loader2 className="spin" size={13} /> : <ChevronDown size={13} />}
+              <span>Load more</span>
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </label>
   );
 }
 
@@ -3510,6 +4017,54 @@ function persistSelectedMcpAppIds(appIds: string[]) {
   } catch (err) {
     console.warn('Unable to persist selected MCP apps', err);
   }
+}
+
+function loadFocusTargets(): FocusTarget[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(FOCUS_TARGETS_KEY) || '[]') as Partial<FocusTarget>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isFocusTarget).slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function persistFocusTargets(targets: FocusTarget[]) {
+  try {
+    window.localStorage.setItem(FOCUS_TARGETS_KEY, JSON.stringify(targets.slice(0, 12)));
+  } catch (err) {
+    console.warn('Unable to persist focus targets', err);
+  }
+}
+
+function isFocusTarget(value: Partial<FocusTarget>): value is FocusTarget {
+  if (!value || typeof value.id !== 'string' || typeof value.label !== 'string') return false;
+  if (value.source === 'trino') return true;
+  return value.source === 'elastic' && typeof value.indexPattern === 'string';
+}
+
+function focusTargetKey(target: FocusTarget) {
+  if (target.source === 'trino') return `trino:${target.catalog || '*'}:${target.schema || '*'}:${target.table || '*'}`;
+  return `elastic:${target.indexPattern}`;
+}
+
+function formatTrinoFocusLabel(catalog: string, schema: string, table: string, tableType?: string) {
+  const source = [catalog || 'auto', schema || 'auto', table || 'auto'].join('.');
+  return tableType ? `${source} (${tableType})` : source;
+}
+
+function mergeUniqueStrings(current: string[], next: string[]) {
+  return [...new Set([...current, ...next])];
+}
+
+function mergeUniqueTables(current: TrinoFocusTableResponse['tables'], next: TrinoFocusTableResponse['tables']) {
+  const seen = new Set<string>();
+  return [...current, ...next].filter(table => {
+    const key = `${table.schema}.${table.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function removeDefaultIntroMessage(messages: ChatMessage[]) {

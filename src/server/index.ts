@@ -15,11 +15,13 @@ import { explainError, sanitizeErrorMessage } from './error-explainer.js';
 import { AnalyticsProfileService } from './analytics-profile-service.js';
 import { testExternalConnection, type ConnectionTestTarget } from './connection-tests.js';
 import { applyDemoConnectionChecks, buildDemoPlan } from './demo.js';
+import { searchElasticFocusTargets } from './elastic-profiler.js';
+import { listTrinoFocusCatalogs, listTrinoFocusSchemas, listTrinoFocusTables } from './trino-profiler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '../..');
 const clientDir = path.resolve(rootDir, 'dist/client');
-const manifestPath = path.resolve(rootDir, process.env.MCP_APPS_MANIFEST || 'mcp-apps.installed.json');
+const manifestPath = resolveMcpManifestPath();
 const analyticsProfileStoragePath = path.resolve(rootDir, process.env.ANALYTICS_PROFILER_STORAGE_FILE || '.rubberband/analytics-profile.json');
 const packageJson = readPackageJson();
 const defaultPort = 8765;
@@ -45,7 +47,28 @@ const chatBodySchema = z.object({
     })
   ),
   appIds: z.array(z.string()).optional(),
-  deepAnalysis: z.boolean().optional()
+  deepAnalysis: z.boolean().optional(),
+  focusTargets: z
+    .array(
+      z.union([
+        z.object({
+          source: z.literal('trino'),
+          catalog: z.string().optional(),
+          schema: z.string().optional(),
+          table: z.string().optional(),
+          tableType: z.string().optional(),
+          label: z.string().optional()
+        }),
+        z.object({
+          source: z.literal('elastic'),
+          indexPattern: z.string(),
+          kind: z.string().optional(),
+          label: z.string().optional()
+        })
+      ])
+    )
+    .max(24)
+    .optional()
 });
 
 const toolBodySchema = z.object({
@@ -67,6 +90,26 @@ const settingsTestBodySchema = z.object({
 
 const demoBodySchema = z.object({
   appIds: z.array(z.string()).optional()
+});
+
+const focusPageSchema = z.object({
+  q: z.string().optional().default(''),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional()
+});
+
+const focusTrinoCatalogSchema = focusPageSchema.extend({
+  catalog: z.string().min(1)
+});
+
+const focusTrinoTableSchema = focusPageSchema.extend({
+  catalog: z.string().min(1),
+  schema: z.string().min(1)
+});
+
+const focusElasticSearchSchema = z.object({
+  query: z.string().min(1),
+  limit: z.coerce.number().int().min(1).max(200).optional()
 });
 
 async function main() {
@@ -235,6 +278,46 @@ async function main() {
     }
   });
 
+  router.get('/api/focus/trino/catalogs', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const query = focusPageSchema.parse(req.query);
+      res.json(await listTrinoFocusCatalogs(session.settings, query.q, query.limit, query.offset));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/api/focus/trino/schemas', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const query = focusTrinoCatalogSchema.parse(req.query);
+      res.json(await listTrinoFocusSchemas(session.settings, query.catalog, query.q, query.limit, query.offset));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/api/focus/trino/tables', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const query = focusTrinoTableSchema.parse(req.query);
+      res.json(await listTrinoFocusTables(session.settings, query.catalog, query.schema, query.q, query.limit, query.offset));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/api/focus/elastic/search', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const query = focusElasticSearchSchema.parse(req.query);
+      res.json(await searchElasticFocusTargets(session.settings, query.query, query.limit));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post('/api/apps/:appId/tools/call', async (req, res, next) => {
     try {
       const session = sessions.get(req, res);
@@ -296,7 +379,7 @@ async function main() {
       });
       const result = await runChat(session.registry, session.settings, body.messages, body.appIds, (message, detail) => {
         session.progress.publish(message, detail);
-      }, analyticsProfiles, { deepAnalysis: body.deepAnalysis === true });
+      }, analyticsProfiles, { deepAnalysis: body.deepAnalysis === true, focusTargets: body.focusTargets || [] });
       logger.info('chat completed', {
         sessionId: session.id.slice(0, 8),
         toolCallCount: result.toolCalls?.length || 0
@@ -365,6 +448,13 @@ main().catch(error => {
   console.error(error);
   process.exit(1);
 });
+
+function resolveMcpManifestPath() {
+  if (process.env.MCP_APPS_MANIFEST) return path.resolve(rootDir, process.env.MCP_APPS_MANIFEST);
+  const installed = path.resolve(rootDir, 'mcp-apps.installed.json');
+  if (fs.existsSync(installed)) return installed;
+  return path.resolve(rootDir, 'mcp-apps.json');
+}
 
 function normalizeBasePath(value: string) {
   const trimmed = value.trim();

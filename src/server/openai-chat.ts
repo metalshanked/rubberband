@@ -65,7 +65,24 @@ type AnalyticsProfileReader = {
 
 export type ChatRunOptions = {
   deepAnalysis?: boolean;
+  focusTargets?: FocusTarget[];
 };
+
+export type FocusTarget =
+  | {
+      source: 'trino';
+      catalog?: string;
+      schema?: string;
+      table?: string;
+      tableType?: string;
+      label?: string;
+    }
+  | {
+      source: 'elastic';
+      indexPattern: string;
+      kind?: string;
+      label?: string;
+    };
 
 export type TrinoCatalogMap = {
   catalogs: Array<{
@@ -110,17 +127,18 @@ export async function runChat(
   const apiKey = settings.get('OPENAI_API_KEY');
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content || '';
   const analysisTarget = parseDeepAnalysisTarget(latestUserMessage);
+  const focusContext = renderFocusPromptContext(options.focusTargets || []);
 
   if (!options.deepAnalysis && isTrinoCatalogMapRequest(latestUserMessage)) {
     return runTrinoCatalogMap(settings, latestUserMessage, onProgress, analyticsProfiles);
   }
 
   if (options.deepAnalysis) {
-    return runDeepAgentToolChat(registry, settings, messages, appIds, onProgress, analyticsProfiles);
+    return runDeepAgentToolChat(registry, settings, messages, appIds, onProgress, analyticsProfiles, focusContext);
   }
 
   if (analysisTarget) {
-    return runDeepAnalysis(settings, latestUserMessage, analysisTarget, onProgress, analyticsProfiles);
+    return runDeepAnalysis(settings, latestUserMessage, analysisTarget, onProgress, analyticsProfiles, { focusContext });
   }
 
   if (!apiKey) {
@@ -150,7 +168,8 @@ export async function runChat(
         buildVizContract(settings),
         analyticsProfiles?.getPromptContext(),
         buildElasticCcsPromptGuidance(settings),
-        buildMcpReadOnlyPromptGuidance(settings)
+        buildMcpReadOnlyPromptGuidance(settings),
+        focusContext
       )
     },
     ...compactChatMessages(messages).map(message => ({ role: message.role, content: openAiContentForMessage(message) }))
@@ -251,7 +270,8 @@ async function runDeepAgentToolChat(
   messages: ChatMessage[],
   appIds: string[] | undefined,
   onProgress: ChatProgress,
-  analyticsProfiles?: AnalyticsProfileReader
+  analyticsProfiles?: AnalyticsProfileReader,
+  focusContext = ''
 ) {
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content || '';
   if (!settings.get('OPENAI_API_KEY')) {
@@ -356,6 +376,7 @@ async function runDeepAgentToolChat(
     'For broad investigation requests, reason step by step and use tools as needed, but keep the final answer concise.',
     'Only perform read-only analysis. Do not ask tools to import, save, create, update, delete, reindex, acknowledge, close, assign, run DDL/DML, or otherwise mutate external systems.',
     analyticsProfiles?.getPromptContext() ? `Background analytics profile context:\n${analyticsProfiles.getPromptContext()}` : '',
+    focusContext ? `Focus analysis targets:\n${focusContext}` : '',
     settings.get('DOMAIN_KNOWLEDGE') ? `Domain Knowledge:\n${settings.get('DOMAIN_KNOWLEDGE')}` : '',
     buildElasticCcsPromptGuidance(settings) ? `Elastic CCS defaults:\n${buildElasticCcsPromptGuidance(settings)}` : '',
     buildMcpReadOnlyPromptGuidance(settings) ? `MCP tool safety:\n${buildMcpReadOnlyPromptGuidance(settings)}` : '',
@@ -379,11 +400,11 @@ async function runDeepAnalysis(
   target: AnalysisTarget,
   onProgress: ChatProgress,
   analyticsProfiles?: AnalyticsProfileReader,
-  options: { forceDeepAgent?: boolean } = {}
+  options: { forceDeepAgent?: boolean; focusContext?: string } = {}
 ) {
   if (analyticsProfiles && !options.forceDeepAgent) {
     onProgress('Reading background analytics profile');
-    const content = analyticsProfiles.renderProfile(target);
+    const content = applyFocusContextToProfile(analyticsProfiles.renderProfile(target), options.focusContext);
     const snapshot = analyticsProfiles.snapshot();
     const relevantStatuses = target === 'all' ? [snapshot.elastic.status, snapshot.trino.status] : [snapshot[target].status];
     if (relevantStatuses.some(status => status === 'idle' || status === 'error' || status === 'stale' || status === 'skipped') && !snapshot.running) {
@@ -395,7 +416,7 @@ async function runDeepAnalysis(
   }
 
   if (!settings.get('OPENAI_API_KEY')) {
-    const profileText = await runProfileFallback(settings, request, target, onProgress);
+    const profileText = applyFocusContextToProfile(await runProfileFallback(settings, request, target, onProgress), options.focusContext);
     onProgress('Done');
     const toolCalls = [] as RenderableToolCall[];
     return { content: profileText, toolCalls, followUps: generateSuggestedFollowUps(profileText, toolCalls, request) };
@@ -471,7 +492,7 @@ async function runTrinoCatalogMap(settings: SettingsAccess, request: string, onP
   };
 }
 
-export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '') {
+export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '', focusContext = '') {
   const base =
     'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.';
 
@@ -491,7 +512,10 @@ export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'
   const mcpSafetySection = mcpSafetyGuidance
     ? `\n\nMCP tool safety:\n${truncate(mcpSafetyGuidance, 2000)}`
     : '';
-  if (!skills.length) return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}`;
+  const focusSection = focusContext
+    ? `\n\nFocus analysis targets:\n${truncate(focusContext, 3000)}\nPrefer these targets for discovery, profiling, visualizations, and tool calls unless the user explicitly asks to broaden the search. Treat auto targets as a request to choose the best matching catalog, schema, table, view, or index within the selected source.`
+    : '';
+  if (!skills.length) return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}`;
 
   const grouped = new Map<string, typeof skills>();
   for (const skill of skills) {
@@ -514,7 +538,22 @@ export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'
     );
   }
 
-  return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${sections.join('')}`;
+  return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}${sections.join('')}`;
+}
+
+function renderFocusPromptContext(targets: FocusTarget[]) {
+  const lines = targets.map(target => {
+    if (target.source === 'trino') {
+      const parts = [target.catalog || 'auto catalog', target.schema || 'auto schema', target.table || 'auto table/view'];
+      return `- Trino / Starburst: ${parts.join('.')} (${target.tableType || 'auto type'})`;
+    }
+    return `- Elasticsearch: ${target.indexPattern}${target.kind ? ` (${target.kind})` : ''}`;
+  });
+  return lines.join('\n');
+}
+
+function applyFocusContextToProfile(content: string, focusContext = '') {
+  return focusContext ? `Focus analysis targets:\n${focusContext}\n\n${content}` : content;
 }
 
 export function buildVizContract(settings: Pick<SettingsAccess, 'get'>) {

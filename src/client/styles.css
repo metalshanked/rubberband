@@ -111,6 +111,7 @@ input {
 .navCollapsed .sectionButton span,
 .navCollapsed .appList,
 .navCollapsed .historyList,
+.navCollapsed .historyFooter,
 .navCollapsed .toolList {
   display: none;
 }
@@ -691,12 +692,23 @@ input {
   border-bottom: 1px solid #d8dee6;
 }
 
+.topbarContext {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
 .chatContext {
   margin: 0;
+  min-width: 0;
   color: #4f5d6b;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbarActions {
@@ -707,6 +719,332 @@ input {
 
 .exportMenu {
   position: relative;
+}
+
+.focusMenu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.focusButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  border: 1px solid #cbd3dd;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  color: #2f3d49;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.focusButton.active {
+  border-color: #78b8d8;
+  background: #edf8fb;
+  color: #075d73;
+}
+
+.focusButton em {
+  display: grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #177c99;
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.focusPanel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 25;
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid #cbd3dd;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 36px rgba(31, 42, 54, 0.16);
+}
+
+.focusTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.focusTabs button,
+.focusPanelActions button,
+.focusSearch button,
+.focusOptionList button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid #d8dee6;
+  border-radius: 6px;
+  background: #fff;
+  color: #35424f;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.focusTabs button.active {
+  border-color: #78b8d8;
+  background: #edf8fb;
+  color: #075d73;
+}
+
+.focusPicker {
+  display: grid;
+  gap: 8px;
+}
+
+.focusLookup {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: #566473;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.focusLookupBody {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.focusLookup input,
+.focusSearch input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid #cfd9e3;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+  color: #26323d;
+  font-size: 12px;
+}
+
+.focusOptionList {
+  display: grid;
+  gap: 0;
+  max-height: 116px;
+  overflow: auto;
+  border: 1px solid #d7e1ea;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.focusOptionList button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  justify-content: initial;
+  align-items: center;
+  min-height: 30px;
+  border: 0;
+  border-radius: 0;
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.focusOptionList button + button {
+  border-top: 1px solid #edf1f5;
+}
+
+.focusOptionList button:hover:not(:disabled) {
+  background: #f4f8fb;
+}
+
+.focusOptionList button.selected {
+  background: #eaf7fd;
+  color: #075d73;
+}
+
+.focusOptionList button svg {
+  color: transparent;
+}
+
+.focusOptionList button.selected svg {
+  color: #087ea4;
+}
+
+.focusOptionList button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.focusOptionList span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focusOptionList em {
+  color: #6a7785;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.focusOptionList .focusLoadMore {
+  display: inline-flex;
+  justify-content: center;
+  border-top: 1px solid #edf1f5;
+  color: #075d99;
+  background: #f7fbff;
+}
+
+.focusPanelActions {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.focusSearch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+}
+
+.focusAddButton {
+  background: #0077cc !important;
+  border-color: #0077cc !important;
+  color: #fff !important;
+}
+
+.focusResultList {
+  display: grid;
+  gap: 5px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.focusResultList button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  padding: 7px 8px;
+  background: #fff;
+  color: #26323d;
+  cursor: pointer;
+  text-align: left;
+}
+
+.focusResultList button + button {
+  border-top: 1px solid #edf1f5;
+}
+
+.focusResultList button:hover {
+  background: #f4f8fb;
+}
+
+.focusResultList span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focusResultList strong,
+.focusResultList small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focusResultList strong {
+  font-size: 12px;
+}
+
+.focusResultList small {
+  color: #687585;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.focusResultList em {
+  color: #6a7785;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.focusPatternResult {
+  background: #f7fbff !important;
+  color: #075d73 !important;
+}
+
+.focusHint {
+  color: #687585;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.focusTargets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.focusChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 24px;
+  border: 1px solid #cae2ee;
+  border-radius: 999px;
+  padding: 2px 4px 2px 8px;
+  background: #f2fbfe;
+  color: #214b5a;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.focusChip span {
+  min-width: 0;
+  max-width: 330px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focusChip button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #4f6670;
+  cursor: pointer;
+}
+
+.focusNotice {
+  color: #8a4b0f;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .demoButton,

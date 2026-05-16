@@ -8,6 +8,14 @@ export type ElasticProfileOptions = {
   includeSystem?: boolean;
 };
 
+export type ElasticFocusTarget = {
+  name: string;
+  kind: 'index' | 'data_stream' | 'cross_cluster';
+  docs?: number;
+  health?: string;
+  backingIndices?: number;
+};
+
 type CatIndex = {
   index?: string;
   'docs.count'?: string;
@@ -246,6 +254,42 @@ export async function buildElasticProfile(settings: SettingsAccess, options: Ela
   };
 }
 
+export async function searchElasticFocusTargets(settings: SettingsAccess, query: string, limit = 50) {
+  const normalized = query.trim();
+  if (!normalized) return { targets: [] as ElasticFocusTarget[] };
+  const boundedLimit = clampNumber(limit, 1, 200, 50);
+  const client = createElasticClient(settings);
+  const [indices, dataStreams] = await Promise.all([
+    client.get<CatIndex[]>('/_cat/indices?format=json&h=index,docs.count,health,status&s=index').catch(() => []),
+    client.get<DataStreamListing>('/_data_stream?expand_wildcards=open,hidden').catch(() => ({ data_streams: [] }))
+  ]);
+  const matcher = buildFocusMatcher(normalized);
+  const targets: ElasticFocusTarget[] = [
+    ...indices
+      .map(item => ({
+        name: String(item.index || ''),
+        kind: 'index' as const,
+        docs: Number(item['docs.count'] || 0),
+        health: item.health
+      }))
+      .filter(item => item.name && matcher(item.name)),
+    ...(dataStreams.data_streams || [])
+      .map(stream => ({
+        name: String(stream.name || ''),
+        kind: 'data_stream' as const,
+        health: stream.status,
+        backingIndices: stream.indices?.length || 0
+      }))
+      .filter(item => item.name && matcher(item.name))
+  ];
+  if (normalized.includes(':')) {
+    targets.unshift({ name: normalized, kind: 'cross_cluster' });
+  }
+  return {
+    targets: dedupeFocusTargets(targets).slice(0, boundedLimit)
+  };
+}
+
 export function renderElasticProfile(profile: ElasticProfile) {
   const lines = [
     '# Elastic Deep Analysis',
@@ -319,6 +363,25 @@ function buildElasticAuthHeader(settings: Pick<SettingsAccess, 'get'>) {
   const password = settings.get('ELASTICSEARCH_PASSWORD');
   if (username && password) return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
   return '';
+}
+
+function buildFocusMatcher(query: string) {
+  const lowerQuery = query.toLowerCase();
+  if (/[*?]/.test(query)) {
+    const matcher = wildcardToRegExp(query, true);
+    return (value: string) => matcher.test(value);
+  }
+  return (value: string) => value.toLowerCase().includes(lowerQuery);
+}
+
+function dedupeFocusTargets(targets: ElasticFocusTarget[]) {
+  const seen = new Set<string>();
+  return targets.filter(target => {
+    const key = `${target.kind}:${target.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function resolveCrossClusterTargets(client: ReturnType<typeof createElasticClient>, ccsSettings: ElasticCcsSettings): Promise<ElasticCrossClusterResolution> {
