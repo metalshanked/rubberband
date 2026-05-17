@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Rubberband">
+  <defs>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#102a38" flood-opacity="0.22"/>
+    </filter>
+    <linearGradient id="band" x1="24" y1="18" x2="104" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b9f21c"/>
+      <stop offset="0.52" stop-color="#8fd60f"/>
+      <stop offset="1" stop-color="#67b80a"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="26" y1="18" x2="92" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dcff54" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#dcff54" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="#184b63"/>
+  <path d="M14 38c7-18 21-26 43-27h23c20 1 31 9 38 25" fill="none" stroke="#215b73" stroke-width="10" stroke-linecap="round" opacity="0.48"/>
+
+  <g filter="url(#soft-shadow)">
+    <g fill="none" stroke="#4d8e08" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" opacity="0.95">
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(0 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(45 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(90 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(135 64 64)"/>
+    </g>
+    <g fill="none" stroke="url(#band)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(0 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(45 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(90 64 64)"/>
+      <ellipse cx="64" cy="64" rx="46" ry="25" transform="rotate(135 64 64)"/>
+    </g>
+    <g fill="none" stroke="url(#shine)" stroke-width="3" stroke-linecap="round" opacity="0.8">
+      <path d="M22 58c16-16 60-20 84-4"/>
+      <path d="M38 28c22 6 46 39 54 70"/>
+      <path d="M94 31c-24 6-51 41-59 71"/>
+    </g>
+  </g>
+</svg>
