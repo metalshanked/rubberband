@@ -630,7 +630,7 @@ test('builds LiteLLM-compatible authorization header schemes', () => {
 });
 
 test('loads installed app skills into selected app system guidance', async () => {
-  const registry = await McpRegistry.fromManifest('tests/fixtures/empty-manifest.json');
+  const registry = await McpRegistry.fromManifest('tests/fixtures/empty-manifest.json', mapSettings({ MCP_ENABLED_APPS: 'fixture-observability', MCP_DISABLED_APPS: '__none__' }) as never);
   const prompt = buildSystemPrompt(registry, ['fixture-observability']);
 
   assert.match(prompt, /Fixture Observability/);
@@ -1540,6 +1540,136 @@ test('bounded Trino profiler catalogs tables and suggests analytics', async () =
     const cachedProfile = await buildTrinoProfile(settings as never, { maxCatalogs: 2, maxTablesPerCatalog: 10, maxColumnsPerCatalog: 20 });
     assert.equal(cachedProfile.cache?.hit, true);
     assert.equal(statements.length, statementCount);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Trino profiler honors focus catalog and schema targets', async () => {
+  const previousFetch = globalThis.fetch;
+  const statements: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/v1/statement')) {
+      const sql = String(init?.body || '');
+      statements.push(sql);
+      if (sql.includes('SHOW CATALOGS')) {
+        return new Response(JSON.stringify({ data: [['tpch'], ['apple']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('"apple".information_schema.tables')) {
+        return new Response(JSON.stringify({ data: [['mango', 'orders', 'BASE TABLE'], ['mango', 'customers', 'BASE TABLE']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('information_schema.columns')) {
+        return new Response(JSON.stringify({ data: [['mango', 'orders', 'order_id', 'varchar'], ['mango', 'customers', 'customer_id', 'varchar']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          TRINO_HOST: 'focused-trino.test',
+          TRINO_PORT: '8080',
+          TRINO_SCHEME: 'http',
+          TRINO_USER: 'analyst',
+          TRINO_AUTH_TYPE: 'none'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const profile = await buildTrinoProfile(settings as never, {
+      maxCatalogs: 5,
+      maxTablesPerCatalog: 10,
+      maxColumnsPerCatalog: 20,
+      focusTargets: [{ catalog: 'apple', schema: 'mango' }]
+    });
+
+    assert.deepEqual(profile.catalogs, ['apple']);
+    assert.deepEqual(profile.analyzedTables.map(table => `${table.catalog}.${table.schema}.${table.name}`), [
+      'apple.mango.orders',
+      'apple.mango.customers'
+    ]);
+    assert.ok(statements.some(statement => statement.includes('"apple".information_schema.tables') && statement.includes("table_schema = 'mango'")));
+    assert.ok(!statements.some(statement => statement.includes('"tpch".information_schema.tables')));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('focused table questions use host-side Trino metadata instead of unrelated profile context', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/v1/statement')) {
+      const sql = String(init?.body || '');
+      if (sql.includes('SHOW CATALOGS')) {
+        return new Response(JSON.stringify({ data: [['tpch'], ['apple']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('"apple".information_schema.tables')) {
+        return new Response(JSON.stringify({ data: [['mango', 'orders', 'BASE TABLE']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('information_schema.columns')) {
+        return new Response(JSON.stringify({ data: [['mango', 'orders', 'order_id', 'varchar']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const registry = {
+      getSkillGuidance: () => [],
+      listTools: async () => {
+        throw new Error('MCP tools should not be listed for focused table metadata');
+      },
+      callTool: async () => {
+        throw new Error('MCP tools should not be called for focused table metadata');
+      }
+    };
+    const settings = {
+      get: (key: string) =>
+        ({
+          OPENAI_API_KEY: 'test-key',
+          TRINO_HOST: 'focused-chat-trino.test',
+          TRINO_PORT: '8080',
+          TRINO_SCHEME: 'http',
+          TRINO_USER: 'analyst',
+          TRINO_AUTH_TYPE: 'none'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const result = await runChat(
+      registry as never,
+      settings as never,
+      [{ role: 'user', content: 'what are some tables?' }],
+      ['mcp-app-trino'],
+      () => undefined,
+      undefined,
+      { focusTargets: [{ source: 'trino', catalog: 'apple', schema: 'mango' }] }
+    );
+
+    assert.match(result.content, /apple\.mango\.orders/);
+    assert.doesNotMatch(result.content, /tpch/i);
   } finally {
     globalThis.fetch = previousFetch;
   }

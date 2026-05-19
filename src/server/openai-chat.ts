@@ -2,7 +2,7 @@ import type { ChatMessage, RenderableToolCall } from './types.js';
 import type { McpRegistry } from './mcp-registry.js';
 import type { SettingsAccess } from './settings.js';
 import { type AnalysisTarget, runAnalyticsDeepAgent, runRubberbandDeepAgent } from './deep-agent-runner.js';
-import type { TrinoProfile } from './trino-profiler.js';
+import type { TrinoProfile, TrinoProfileFocusTarget } from './trino-profiler.js';
 import { fetchWithMasterTls } from './tls.js';
 import type { AnalyticsProfileSnapshot } from './analytics-profile-service.js';
 import { buildElasticCcsPromptGuidance } from './elastic-ccs.js';
@@ -128,9 +128,14 @@ export async function runChat(
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content || '';
   const analysisTarget = parseDeepAnalysisTarget(latestUserMessage);
   const focusContext = renderFocusPromptContext(options.focusTargets || []);
+  const trinoFocusTargets = getTrinoFocusTargets(options.focusTargets || []);
+
+  if (trinoFocusTargets.length && isFocusedTrinoMetadataRequest(latestUserMessage)) {
+    return runFocusedTrinoMetadata(settings, latestUserMessage, onProgress, trinoFocusTargets);
+  }
 
   if (!options.deepAnalysis && isTrinoCatalogMapRequest(latestUserMessage)) {
-    return runTrinoCatalogMap(settings, latestUserMessage, onProgress, analyticsProfiles);
+    return runTrinoCatalogMap(settings, latestUserMessage, onProgress, analyticsProfiles, trinoFocusTargets);
   }
 
   if (options.deepAnalysis) {
@@ -138,7 +143,7 @@ export async function runChat(
   }
 
   if (analysisTarget) {
-    return runDeepAnalysis(settings, latestUserMessage, analysisTarget, onProgress, analyticsProfiles, { focusContext });
+    return runDeepAnalysis(settings, latestUserMessage, analysisTarget, onProgress, analyticsProfiles, { focusContext, focusTargets: trinoFocusTargets });
   }
 
   if (!apiKey) {
@@ -400,8 +405,15 @@ async function runDeepAnalysis(
   target: AnalysisTarget,
   onProgress: ChatProgress,
   analyticsProfiles?: AnalyticsProfileReader,
-  options: { forceDeepAgent?: boolean; focusContext?: string } = {}
+  options: { forceDeepAgent?: boolean; focusContext?: string; focusTargets?: TrinoProfileFocusTarget[] } = {}
 ) {
+  if (options.focusTargets?.length) {
+    const profileText = applyFocusContextToProfile(await runProfileFallback(settings, request, target, onProgress, options.focusTargets), options.focusContext);
+    onProgress('Done');
+    const toolCalls = [] as RenderableToolCall[];
+    return { content: profileText, toolCalls, followUps: generateSuggestedFollowUps(profileText, toolCalls, request) };
+  }
+
   if (analyticsProfiles && !options.forceDeepAgent) {
     onProgress('Reading background analytics profile');
     const content = applyFocusContextToProfile(analyticsProfiles.renderProfile(target), options.focusContext);
@@ -433,7 +445,7 @@ async function runDeepAnalysis(
   };
 }
 
-async function runProfileFallback(settings: SettingsAccess, request: string, target: AnalysisTarget, onProgress: ChatProgress) {
+async function runProfileFallback(settings: SettingsAccess, request: string, target: AnalysisTarget, onProgress: ChatProgress, focusTargets: TrinoProfileFocusTarget[] = []) {
   const sections = [];
   if (target === 'elastic' || target === 'all') {
     const { buildElasticProfile, renderElasticProfile } = await import('./elastic-profiler.js');
@@ -443,7 +455,7 @@ async function runProfileFallback(settings: SettingsAccess, request: string, tar
   if (target === 'trino' || target === 'all') {
     const { buildTrinoProfile, renderTrinoProfile } = await import('./trino-profiler.js');
     onProgress('Running bounded Trino / Starburst profiler');
-    sections.push(renderTrinoProfile(await buildTrinoProfile(settings, parseTrinoProfileOptions(request))));
+    sections.push(renderTrinoProfile(await buildTrinoProfile(settings, { ...parseTrinoProfileOptions(request), focusTargets })));
   }
   if (target === 'all') {
     sections.push(renderFederatedProfileNote());
@@ -451,20 +463,52 @@ async function runProfileFallback(settings: SettingsAccess, request: string, tar
   return sections.join('\n\n');
 }
 
-async function runTrinoCatalogMap(settings: SettingsAccess, request: string, onProgress: ChatProgress, analyticsProfiles?: AnalyticsProfileReader) {
+async function runFocusedTrinoMetadata(settings: SettingsAccess, request: string, onProgress: ChatProgress, focusTargets: TrinoProfileFocusTarget[]) {
+  const { buildTrinoProfile } = await import('./trino-profiler.js');
+  onProgress('Running focused Trino / Starburst metadata lookup');
+  const profile = await buildTrinoProfile(settings, { ...parseTrinoProfileOptions(request), focusTargets });
+  const sourceLines = profile.analyzedTables.slice(0, 30).map(table => {
+    const columns = table.columns.length ? `; columns ${table.columns.slice(0, 8).map(column => column.name).join(', ')}` : '';
+    return `- \`${table.catalog}.${table.schema}.${table.name}\` (${table.type}${columns})`;
+  });
+  const focusLabel = focusTargets
+    .map(target => [target.catalog || 'auto catalog', target.schema || 'auto schema', target.table || 'auto table/view'].join('.'))
+    .join(', ');
+  const boundsLine = profile.skipped.uninspectedTables || profile.skipped.uninspectedColumnTables
+    ? `Bounds: skipped ${profile.skipped.uninspectedTables} table(s) and ${profile.skipped.uninspectedColumnTables || 0} column inspection(s).`
+    : '';
+  const content = [
+    `Focused Trino / Starburst metadata for ${focusLabel}:`,
+    '',
+    sourceLines.length ? sourceLines.join('\n') : 'No matching tables or views were found within the selected focus target.',
+    ...(boundsLine ? ['', boundsLine] : [])
+  ].filter(Boolean).join('\n');
+  onProgress('Done');
+  const toolCalls = [] as RenderableToolCall[];
+  return { content, toolCalls, followUps: generateSuggestedFollowUps(content, toolCalls, request) };
+}
+
+async function runTrinoCatalogMap(
+  settings: SettingsAccess,
+  request: string,
+  onProgress: ChatProgress,
+  analyticsProfiles?: AnalyticsProfileReader,
+  focusTargets: TrinoProfileFocusTarget[] = []
+) {
   const { buildTrinoProfile } = await import('./trino-profiler.js');
   onProgress(analyticsProfiles ? 'Reading background Trino catalog profile' : 'Building bounded Trino catalog map');
   const backgroundProfile = analyticsProfiles?.snapshot().trino.profile;
-  if (analyticsProfiles && !backgroundProfile) {
+  if (analyticsProfiles && !backgroundProfile && !focusTargets.length) {
     void analyticsProfiles.refreshNow('chat-catalog-map-request');
     const content = 'The shared Trino catalog profile is not ready yet. Rubberband has started or queued a background profiler run; try the catalog map again after it completes.';
     const toolCalls = [] as RenderableToolCall[];
     onProgress('Done');
     return { content, toolCalls, followUps: generateSuggestedFollowUps(content, toolCalls, request) };
   }
-  const profile = backgroundProfile || await buildTrinoProfile(settings, {
+  const profile = (!focusTargets.length && backgroundProfile) || await buildTrinoProfile(settings, {
       ...parseTrinoProfileOptions(request),
-      maxCatalogs: parseTrinoProfileOptions(request).maxCatalogs || readSettingBound(settings, 'TRINO_PROFILER_MAX_CATALOGS')
+      maxCatalogs: parseTrinoProfileOptions(request).maxCatalogs || readSettingBound(settings, 'TRINO_PROFILER_MAX_CATALOGS'),
+      focusTargets
     });
   const map = buildTrinoCatalogMap(profile);
   onProgress('Rendering Trino catalog map');
@@ -964,8 +1008,26 @@ export function isTrinoCatalogMapRequest(content: string) {
   );
 }
 
+function isFocusedTrinoMetadataRequest(content: string) {
+  const normalized = content.toLowerCase();
+  if (!/\b(tables?|views?|schemas?|catalogs?)\b/.test(normalized)) return false;
+  return !/\b(visuali[sz]e|visualization|viz|chart|dashboard|graph|plot)\b/.test(normalized);
+}
+
 function isDeepAnalysisRequest(normalized: string) {
   return /\b(deep analysis|profile|analy[sz]e|index recommender|index catalog|table catalog|canned analytics|suggest(ed)? questions)\b/.test(normalized);
+}
+
+function getTrinoFocusTargets(targets: FocusTarget[]): TrinoProfileFocusTarget[] {
+  return targets
+    .filter((target): target is Extract<FocusTarget, { source: 'trino' }> => target.source === 'trino')
+    .map(target => ({
+      catalog: target.catalog,
+      schema: target.schema,
+      table: target.table,
+      tableType: target.tableType
+    }))
+    .filter(target => target.catalog || target.schema || target.table);
 }
 
 function parseElasticProfileOptions(content: string) {

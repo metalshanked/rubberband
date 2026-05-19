@@ -16,13 +16,98 @@
   </head>
   <body>
     <script>
+      const rubberbandPreviewToolsVisible = new URLSearchParams(window.location.search).get('rubberbandPreviewTools') === '1';
+
+      function prepareRubberbandHtml(html) {
+        if (rubberbandPreviewToolsVisible) return html;
+
+        const injection = `
+          <style id="rubberband-presentation-mode-style">
+            [data-rubberband-hidden-by-host="true"] {
+              display: none !important;
+            }
+          </style>
+          <script>
+            (() => {
+              document.documentElement.dataset.rubberbandPreviewTools = 'hidden';
+              const controlTextPattern = /(edit\\s+query|query\\s+editor|selection|select\\s+(?:a\\s+)?(?:chart|visualization|result|view)|chart\\s*type|visualization\\s*type|arguments?\\s*json)/i;
+              const namedControlPattern = /(toolbar|control|controls|selector|selection|dropdown|query|editor|config|settings|form|panel)/i;
+              const controlSelector = [
+                'select',
+                'textarea',
+                'form',
+                'fieldset',
+                'details',
+                '[role="combobox"]',
+                '[aria-haspopup="listbox"]',
+                '[aria-label*="query" i]',
+                '[aria-label*="selection" i]',
+                '[title*="query" i]',
+                '[title*="selection" i]'
+              ].join(',');
+
+              function textOf(element) {
+                return String(element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim();
+              }
+
+              function nameOf(element) {
+                return [
+                  element.id,
+                  typeof element.className === 'string' ? element.className : '',
+                  element.getAttribute('role') || '',
+                  element.getAttribute('aria-label') || '',
+                  element.getAttribute('title') || ''
+                ].join(' ');
+              }
+
+              function shouldUseContainer(element) {
+                return namedControlPattern.test(nameOf(element)) || controlTextPattern.test(textOf(element));
+              }
+
+              function controlContainer(element) {
+                for (let node = element; node && node !== document.body; node = node.parentElement) {
+                  if (node.hasAttribute('data-rubberband-keep')) break;
+                  if (node.matches('form, fieldset, details, label, header, footer, aside')) return node;
+                  if (shouldUseContainer(node)) return node;
+                }
+                return element;
+              }
+
+              function hideHostControls() {
+                document.querySelectorAll(controlSelector).forEach(element => {
+                  controlContainer(element).dataset.rubberbandHiddenByHost = 'true';
+                });
+
+                document.querySelectorAll('button, [role="button"], summary').forEach(element => {
+                  const label = [textOf(element), element.getAttribute('aria-label') || '', element.getAttribute('title') || ''].join(' ');
+                  if (controlTextPattern.test(label)) {
+                    controlContainer(element).dataset.rubberbandHiddenByHost = 'true';
+                  }
+                });
+              }
+
+              if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', hideHostControls, { once: true });
+              } else {
+                hideHostControls();
+              }
+
+              new MutationObserver(() => hideHostControls()).observe(document.documentElement, { childList: true, subtree: true });
+            })();
+          <\/script>
+        `;
+
+        if (html.includes('</body>')) return html.replace('</body>', `${injection}</body>`);
+        return `${html}${injection}`;
+      }
+
       window.addEventListener('message', event => {
         const data = event.data || {};
         if (data.method === 'ui/notifications/sandbox-resource-ready') {
           const html = data.params && data.params.html;
           if (html) {
             document.open();
-            document.write(html);
+            document.write(prepareRubberbandHtml(html));
             document.close();
           }
         }

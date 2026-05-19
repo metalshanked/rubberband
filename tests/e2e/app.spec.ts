@@ -341,16 +341,16 @@ test('expands MCP app previews for review', async ({ page }) => {
 
   const frame = page.locator('.appFrame').first();
   await expect(frame.getByText('Elastic Dashbuilder: create_chart')).toBeVisible();
-  await frame.getByRole('button', { name: 'Expand review' }).click();
+  await frame.getByRole('button', { name: 'Expand visualization' }).click();
   await expect(frame).toHaveClass(/expanded/);
   await expect(frame.locator('.renderer')).toHaveClass(/fitToFrame/);
-  await frame.getByRole('button', { name: 'Show preview tools' }).click();
-  await frame.getByRole('button', { name: 'Use native preview scale' }).click();
+  await frame.getByRole('button', { name: 'Show visualization tools' }).click();
+  await frame.getByRole('button', { name: 'Use native visualization scale' }).click();
   await expect(frame.locator('.renderer')).not.toHaveClass(/fitToFrame/);
-  await frame.getByRole('button', { name: 'Fit preview to review area' }).click();
+  await frame.getByRole('button', { name: 'Fit visualization to review area' }).click();
   await expect(frame.locator('.renderer')).toHaveClass(/fitToFrame/);
-  await frame.getByRole('button', { name: 'Enable preview pan and zoom' }).click();
-  await frame.getByRole('button', { name: 'Zoom preview in' }).click();
+  await frame.getByRole('button', { name: 'Enable visualization pan and zoom' }).click();
+  await frame.getByRole('button', { name: 'Zoom visualization in' }).click();
   await expect(frame.locator('.previewStage')).toHaveAttribute('style', /scale\(1\.18/);
   const overlayBox = await frame.locator('.previewPanOverlay').boundingBox();
   expect(overlayBox).not.toBeNull();
@@ -361,7 +361,7 @@ test('expands MCP app previews for review', async ({ page }) => {
     await page.mouse.up();
   }
   await expect(frame.locator('.previewStage')).toHaveAttribute('style', /translate\((?!0px, 0px)/);
-  await frame.getByRole('button', { name: 'Reset preview pan and zoom' }).click();
+  await frame.getByRole('button', { name: 'Reset visualization pan and zoom' }).click();
   await expect(frame.locator('.previewStage')).toHaveAttribute('style', /translate\(0px, 0px\) scale\(1\)/);
   await page.keyboard.press('Escape');
   await expect(frame).not.toHaveClass(/expanded/);
@@ -550,6 +550,71 @@ test('renders embedded MCP app HTML without resource refetches', async ({ page }
   expect(resourceReadCount).toBe(0);
 });
 
+test('hides embedded preview edit controls until preview tools are shown', async ({ page }) => {
+  const embeddedHtml = `<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Revenue by month</h1>
+      <div class="query-panel">
+        <button>Edit query</button>
+        <label>Selection dropdown <select><option>Revenue</option></select></label>
+        <textarea>select * from revenue</textarea>
+      </div>
+      <div class="chart-area">Actual visualization canvas</div>
+    </main>
+    <script>
+      let nextId = 1;
+      function request(method, params) {
+        const id = nextId++;
+        window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+      }
+      request('ui/initialize', {
+        protocolVersion: '2026-01-26',
+        appInfo: { name: 'Embedded test app', version: '1.0.0' },
+        appCapabilities: {}
+      });
+      window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+    </script>
+  </body>
+</html>`;
+
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: 'Embedded preview ready',
+        toolCalls: [
+          {
+            id: 'embedded-preview-controls',
+            appId: 'embedded',
+            toolName: 'show_preview',
+            toolInput: {},
+            toolResult: { content: [] },
+            html: embeddedHtml,
+            title: 'Embedded preview'
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show embedded preview controls');
+  await page.getByTitle('Send').click();
+
+  const frame = page.locator('.appFrame').first();
+  const appFrame = frame.frameLocator('iframe');
+  await expect(appFrame.getByText('Actual visualization canvas')).toBeVisible();
+  await expect(appFrame.getByText('Edit query')).toBeHidden();
+  await expect(appFrame.getByText('Selection dropdown')).toBeHidden();
+
+  await frame.getByRole('button', { name: 'Show visualization tools' }).click();
+  await expect(appFrame.getByText('Edit query')).toBeVisible();
+  await expect(appFrame.getByText('Selection dropdown')).toBeVisible();
+});
+
 test('exports chat with visualization assets', async ({ page }) => {
   const previewImage = `data:image/png;base64,${await fs.readFile('public/rubberband-mark-32.png', 'base64')}`;
 
@@ -658,16 +723,16 @@ test('edits final MCP preview and starts canned visualization revisions', async 
   await expect(page.getByRole('button', { name: 'Move preview up' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Move preview down' })).toHaveCount(0);
 
-  await page.locator('.appFrame').first().getByRole('button', { name: 'Rename preview' }).click();
+  await page.locator('.appFrame').first().getByRole('button', { name: 'Rename visualization' }).click();
   await page.locator('.appFrame').first().locator('.appFrameTitle input').fill('Renamed preview');
   await page.keyboard.press('Enter');
   await expect(page.locator('.appFrame').first()).toContainText('Renamed preview');
 
   await expect(page.locator('.appFrame').first().getByLabel('Visualization helpers')).toHaveCount(0);
-  await page.locator('.appFrame').first().getByRole('button', { name: 'Show preview tools' }).click();
+  await page.locator('.appFrame').first().getByRole('button', { name: 'Show visualization tools' }).click();
   await expect(page.locator('.appFrame').first().getByLabel('Visualization helpers')).toBeVisible();
 
-  await page.locator('.appFrame').first().getByRole('button', { name: 'Use compact preview height' }).click();
+  await page.locator('.appFrame').first().getByRole('button', { name: 'Use compact visualization height' }).click();
   await expect(page.locator('.appFrame').first().locator('.renderer')).toHaveCSS('height', '480px');
 
   await page.locator('.appFrame').first().getByRole('button', { name: 'Regenerate as a bar chart' }).click();
@@ -783,7 +848,7 @@ test('shows canned action progress and cancels an active generation', async ({ p
   await page.getByTitle('Send').click();
   await expect(page.locator('.appFrame')).toHaveCount(1);
 
-  await page.locator('.appFrame').first().getByRole('button', { name: 'Show preview tools' }).click();
+  await page.locator('.appFrame').first().getByRole('button', { name: 'Show visualization tools' }).click();
   await page.locator('.appFrame').first().getByRole('button', { name: 'Summarize visualization' }).click();
   await expect(page.getByText('Summarizing visualization')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cancel request' })).toBeVisible();

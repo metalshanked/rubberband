@@ -1556,7 +1556,7 @@ function App() {
         };
       })
     );
-    setProgressMessage(`Updated preview from ${update.toolName}`);
+    setProgressMessage(`Updated visualization from ${update.toolName}`);
   }
 
   async function requestVisualizationVariant(toolCall: RenderableToolCall, chartType: string) {
@@ -1564,7 +1564,7 @@ function App() {
     const prompt = [
       `Regenerate "${toolCall.title}" as a ${chartType}.`,
       'Keep the same analytic intent, data source, filters, and dashboard context where possible.',
-      `Use ${toolCall.appId}:${toolCall.toolName} or the best available visualization tool to return an updated preview.`,
+      `Use ${toolCall.appId}:${toolCall.toolName} or the best available visualization tool to return an updated visualization.`,
       `Original tool input: ${truncateForPrompt(JSON.stringify(toolCall.toolInput), 1600)}`
     ].join('\n');
     const requestMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: prompt, hidden: true };
@@ -1582,7 +1582,7 @@ function App() {
       'Explain what it is measuring, what the main takeaway appears to be, and call out any caveats or follow-up questions.',
       'Use the available tool result/spec/data rather than inventing values that are not present.',
       interactions ? `Recent visualization interactions:\n${interactions}` : '',
-      toolCall.resourceUri ? `Preview resource: ${toolCall.resourceUri}` : '',
+      toolCall.resourceUri ? `Visualization resource: ${toolCall.resourceUri}` : '',
       `Original tool input: ${truncateForPrompt(JSON.stringify(toolCall.toolInput), 1600)}`,
       `Tool result context: ${truncateForPrompt(JSON.stringify(toolCall.toolResult), 4200)}`
     ]
@@ -3019,6 +3019,7 @@ function McpAppFrame({
   const [previewView, setPreviewView] = useState({ x: 0, y: 0, scale: 1 });
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(toolCall.title);
+  const [previewReady, setPreviewReady] = useState(false);
   const onToolResultUpdateRef = useRef(onToolResultUpdate);
   const sizeChangeTimeoutRef = useRef<number | null>(null);
   const previewPanRef = useRef<{ pointerId: number; startX: number; startY: number; viewX: number; viewY: number } | null>(null);
@@ -3035,8 +3036,23 @@ function McpAppFrame({
       }),
     [toolCall.appId]
   );
-  const sandboxUrl = useMemo(() => new URL(appUrl('/sandbox_proxy.html'), window.location.origin), []);
+  const sandboxUrl = useMemo(() => {
+    const url = new URL(appUrl('/sandbox_proxy.html'), window.location.origin);
+    url.searchParams.set('rubberbandPreviewTools', showVizHelpers ? '1' : '0');
+    return url;
+  }, [showVizHelpers]);
   const sandbox = useMemo(() => ({ url: sandboxUrl }), [sandboxUrl]);
+  const hostContext = useMemo(
+    () => ({
+      displayMode: 'inline' as const,
+      availableDisplayModes: ['inline' as const],
+      userAgent: 'Rubberband',
+      platform: 'web' as const,
+      rubberbandPreviewTools: showVizHelpers ? 'visible' : 'hidden',
+      rubberbandPresentationMode: !showVizHelpers
+    }),
+    [showVizHelpers]
+  );
   const catalogMapResult = readTrinoCatalogMapResult(toolCall.toolResult);
 
   useEffect(() => {
@@ -3059,6 +3075,7 @@ function McpAppFrame({
   useEffect(() => {
     setPreviewPanMode(false);
     setPreviewView({ x: 0, y: 0, scale: 1 });
+    setPreviewReady(false);
   }, [toolCall.id, toolCall.previewRevision]);
 
   useEffect(() => {
@@ -3068,6 +3085,7 @@ function McpAppFrame({
   }, []);
 
   const handleSizeChanged = useCallback((params: unknown) => {
+    setPreviewReady(true);
     if (expanded) return;
     const nextHeight = Number((params as { height?: unknown }).height);
     if (!Number.isFinite(nextHeight)) return;
@@ -3085,11 +3103,13 @@ function McpAppFrame({
   }, []);
 
   const handleMessage = useCallback(async (params: unknown) => {
+    setPreviewReady(true);
     onVizInteraction(params);
     return { isError: false };
   }, [onVizInteraction]);
 
   const handleRendererError = useCallback((err: unknown) => {
+    setPreviewReady(true);
     console.error(err);
   }, []);
 
@@ -3165,20 +3185,20 @@ function McpAppFrame({
           <button
             className={`iconButton appFrameButton ${showVizHelpers ? 'active' : ''}`}
             onClick={() => setShowVizHelpers(value => !value)}
-            title={showVizHelpers ? 'Hide preview tools' : 'Show preview tools'}
-            aria-label={showVizHelpers ? 'Hide preview tools' : 'Show preview tools'}
+            title={showVizHelpers ? 'Hide visualization tools' : 'Show visualization tools'}
+            aria-label={showVizHelpers ? 'Hide visualization tools' : 'Show visualization tools'}
             aria-expanded={showVizHelpers}
           >
             <Settings size={15} />
           </button>
-          <button className="iconButton appFrameButton" onClick={() => setEditingTitle(true)} title="Rename preview" aria-label="Rename preview">
+          <button className="iconButton appFrameButton" onClick={() => setEditingTitle(true)} title="Rename visualization" aria-label="Rename visualization">
             <Pencil size={15} />
           </button>
           <button
             className="iconButton appFrameButton"
             onClick={() => setExpanded(value => !value)}
-            title={expanded ? 'Exit expanded review' : 'Expand review'}
-            aria-label={expanded ? 'Exit expanded review' : 'Expand review'}
+            title={expanded ? 'Exit expanded visualization' : 'Expand visualization'}
+            aria-label={expanded ? 'Exit expanded visualization' : 'Expand visualization'}
           >
             {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
@@ -3190,13 +3210,13 @@ function McpAppFrame({
             <FileText size={14} />
             Summary
           </button>
-          <button onClick={() => setHeight(480)} title="Use compact preview height" aria-label="Use compact preview height">Compact</button>
-          <button onClick={() => setHeight(720)} title="Use tall preview height" aria-label="Use tall preview height">Tall</button>
+          <button onClick={() => setHeight(480)} title="Use compact visualization height" aria-label="Use compact visualization height">Compact</button>
+          <button onClick={() => setHeight(720)} title="Use tall visualization height" aria-label="Use tall visualization height">Tall</button>
           <button
             className={fitToFrame ? 'active' : ''}
             onClick={() => setFitToFrame(value => !value)}
-            title={fitToFrame ? 'Use native preview scale' : 'Fit preview to review area'}
-            aria-label={fitToFrame ? 'Use native preview scale' : 'Fit preview to review area'}
+            title={fitToFrame ? 'Use native visualization scale' : 'Fit visualization to review area'}
+            aria-label={fitToFrame ? 'Use native visualization scale' : 'Fit visualization to review area'}
           >
             <ZoomIn size={14} />
             Fit
@@ -3206,19 +3226,19 @@ function McpAppFrame({
               <button
                 className={previewPanMode ? 'active' : ''}
                 onClick={() => setPreviewPanMode(value => !value)}
-                title={previewPanMode ? 'Disable preview pan and zoom' : 'Enable preview pan and zoom'}
-                aria-label={previewPanMode ? 'Disable preview pan and zoom' : 'Enable preview pan and zoom'}
+                title={previewPanMode ? 'Disable visualization pan and zoom' : 'Enable visualization pan and zoom'}
+                aria-label={previewPanMode ? 'Disable visualization pan and zoom' : 'Enable visualization pan and zoom'}
               >
                 <Move size={14} />
                 Pan
               </button>
-              <button onClick={() => zoomPreview('out')} title="Zoom preview out" aria-label="Zoom preview out">
+              <button onClick={() => zoomPreview('out')} title="Zoom visualization out" aria-label="Zoom visualization out">
                 <ZoomOut size={14} />
               </button>
-              <button onClick={() => zoomPreview('in')} title="Zoom preview in" aria-label="Zoom preview in">
+              <button onClick={() => zoomPreview('in')} title="Zoom visualization in" aria-label="Zoom visualization in">
                 <ZoomIn size={14} />
               </button>
-              <button onClick={resetPreviewView} title="Reset preview pan and zoom" aria-label="Reset preview pan and zoom">
+              <button onClick={resetPreviewView} title="Reset visualization pan and zoom" aria-label="Reset visualization pan and zoom">
                 <RotateCcw size={14} />
               </button>
             </>
@@ -3260,18 +3280,25 @@ function McpAppFrame({
           <TrinoCatalogMapPreview result={catalogMapResult} />
         ) : (
           <div className={`previewViewport ${previewPanMode ? 'panMode' : ''}`} onWheel={onPreviewWheel}>
+            {!previewReady ? (
+              <div className="previewLoading" role="status" aria-live="polite">
+                <Loader2 className="spin" size={18} />
+                <span>Loading visualization</span>
+              </div>
+            ) : null}
             <div
               className="previewStage"
               style={{ transform: `translate(${previewView.x}px, ${previewView.y}px) scale(${previewView.scale})` }}
             >
               <AppRenderer
-                key={`${toolCall.id}:${toolCall.previewRevision || 0}`}
+                key={`${toolCall.id}:${toolCall.previewRevision || 0}:${showVizHelpers ? 'tools' : 'presentation'}`}
                 toolName={toolCall.toolName}
                 toolResourceUri={toolCall.resourceUri}
                 html={toolCall.html}
                 sandbox={sandbox}
                 toolInput={toolCall.toolInput}
                 toolResult={toolCall.toolResult as never}
+                hostContext={hostContext}
                 onCallTool={proxy.callTool as never}
                 onReadResource={proxy.readResource as never}
                 onListResources={proxy.listResources as never}
@@ -3286,7 +3313,7 @@ function McpAppFrame({
             {previewPanMode ? (
               <div
                 className="previewPanOverlay"
-                aria-label="Preview pan surface"
+                aria-label="Visualization pan surface"
                 onPointerDown={onPreviewPanPointerDown}
                 onPointerMove={onPreviewPanPointerMove}
                 onPointerUp={stopPreviewPan}

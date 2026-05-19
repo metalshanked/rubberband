@@ -5,6 +5,14 @@ export type TrinoProfileOptions = {
   maxCatalogs?: number;
   maxTablesPerCatalog?: number;
   maxColumnsPerCatalog?: number;
+  focusTargets?: TrinoProfileFocusTarget[];
+};
+
+export type TrinoProfileFocusTarget = {
+  catalog?: string;
+  schema?: string;
+  table?: string;
+  tableType?: string;
 };
 
 export type TrinoFocusTable = {
@@ -115,6 +123,8 @@ export async function buildTrinoProfile(settings: SettingsAccess, options: Trino
   const cacheTtlMs = clampNumber(undefined, 0, 86_400_000, readSettingNumber(settings, 'TRINO_PROFILER_CACHE_TTL_MS', 86_400_000));
   const includedCatalogs = parseCsvSetting(settings.get('TRINO_PROFILER_INCLUDED_CATALOGS'));
   const excludedCatalogs = parseCsvSetting(settings.get('TRINO_PROFILER_EXCLUDED_CATALOGS') || defaultExcludedCatalogs.join(','));
+  const focusTargets = normalizeFocusTargets(options.focusTargets || []);
+  const focusedCatalogs = orderedUnique(focusTargets.map(target => target.catalog).filter((item): item is string => Boolean(item)));
   const domainKnowledge = settings.get('DOMAIN_KNOWLEDGE');
   const client = createTrinoClient(settings);
   const cacheKey = buildProfileCacheKey(settings, {
@@ -125,6 +135,7 @@ export async function buildTrinoProfile(settings: SettingsAccess, options: Trino
     catalogConcurrency,
     includedCatalogs,
     excludedCatalogs,
+    focusTargets,
     domainKnowledge
   });
   const cached = cacheTtlMs > 0 ? trinoProfileCache.get(cacheKey) : undefined;
@@ -136,15 +147,20 @@ export async function buildTrinoProfile(settings: SettingsAccess, options: Trino
   }
 
   const allCatalogs = (await client.query('SHOW CATALOGS')).map(row => String(row[0] || '')).filter(Boolean);
-  const candidateCatalogs = filterCatalogs(allCatalogs, includedCatalogs, excludedCatalogs, domainKnowledge);
-  const selectedCatalogs = rankCatalogs(candidateCatalogs.length ? candidateCatalogs : allCatalogs, domainKnowledge).slice(0, maxCatalogs);
+  const candidateCatalogs = focusedCatalogs.length
+    ? allCatalogs.filter(catalog => focusedCatalogs.includes(catalog.toLowerCase()))
+    : filterCatalogs(allCatalogs, includedCatalogs, excludedCatalogs, domainKnowledge);
+  const selectedCatalogs = focusedCatalogs.length
+    ? orderCatalogsByFocus(candidateCatalogs, focusedCatalogs).slice(0, maxCatalogs)
+    : rankCatalogs(candidateCatalogs.length ? candidateCatalogs : allCatalogs, domainKnowledge).slice(0, maxCatalogs);
   const inaccessibleCatalogs: string[] = [];
   let uninspectedTables = 0;
   let uninspectedColumnTables = 0;
   const analyzedTables: TrinoTable[] = [];
 
   const catalogResults = await mapWithConcurrency(selectedCatalogs, catalogConcurrency, async catalog => {
-    const tables: TableListing = await listTables(client, catalog, maxTablesPerCatalog).catch(error => {
+    const catalogFocusTargets = focusTargets.filter(target => target.catalog === catalog.toLowerCase());
+    const tables: TableListing = await listTables(client, catalog, maxTablesPerCatalog, catalogFocusTargets).catch(error => {
       inaccessibleCatalogs.push(`${catalog}: ${error instanceof Error ? error.message : String(error)}`);
       return { totalAvailable: 0, items: [] };
     });
@@ -369,13 +385,20 @@ async function requestStatement(settings: SettingsAccess, url: string, timeoutMs
   }
 }
 
-async function listTables(client: ReturnType<typeof createTrinoClient>, catalog: string, limit: number) {
-  const schemaFilter = client.defaultSchema ? `AND table_schema = ${quoteLiteral(client.defaultSchema)}` : '';
+async function listTables(
+  client: ReturnType<typeof createTrinoClient>,
+  catalog: string,
+  limit: number,
+  focusTargets: TrinoProfileFocusTarget[] = []
+) {
+  const focusFilter = buildTableFocusFilter(focusTargets);
+  const schemaFilter = !focusTargets.length && client.defaultSchema ? `AND table_schema = ${quoteLiteral(client.defaultSchema)}` : '';
   const rows = await client.query(
     [
       'SELECT table_schema, table_name, table_type',
       `FROM ${quoteIdentifier(catalog)}.information_schema.tables`,
       "WHERE table_schema <> 'information_schema'",
+      focusFilter,
       schemaFilter,
       'ORDER BY table_schema, table_name',
       `LIMIT ${limit + 1}`
@@ -522,6 +545,39 @@ function rankCatalogs(catalogs: string[], domainKnowledge: string) {
   const preferred = ['hive', 'iceberg', 'delta', 'postgresql', 'mysql', 'oracle', 'sqlserver', 'tpch', 'tpcds'];
   const lowerKnowledge = domainKnowledge.toLowerCase();
   return [...catalogs].sort((a, b) => scoreCatalog(b, preferred, lowerKnowledge) - scoreCatalog(a, preferred, lowerKnowledge) || a.localeCompare(b));
+}
+
+function normalizeFocusTargets(targets: TrinoProfileFocusTarget[]) {
+  return targets
+    .map(target => ({
+      catalog: target.catalog?.trim().toLowerCase(),
+      schema: target.schema?.trim(),
+      table: target.table?.trim(),
+      tableType: target.tableType?.trim()
+    }))
+    .filter(target => target.catalog || target.schema || target.table);
+}
+
+function orderedUnique(values: string[]) {
+  return [...new Set(values)];
+}
+
+function orderCatalogsByFocus(catalogs: string[], focusedCatalogs: string[]) {
+  const focusOrder = new Map(focusedCatalogs.map((catalog, index) => [catalog, index]));
+  return [...catalogs].sort((a, b) => (focusOrder.get(a.toLowerCase()) ?? 999) - (focusOrder.get(b.toLowerCase()) ?? 999) || a.localeCompare(b));
+}
+
+function buildTableFocusFilter(targets: TrinoProfileFocusTarget[]) {
+  const clauses = targets
+    .map(target => {
+      const parts = [
+        target.schema ? `table_schema = ${quoteLiteral(target.schema)}` : '',
+        target.table ? `table_name = ${quoteLiteral(target.table)}` : ''
+      ].filter(Boolean);
+      return parts.length ? `(${parts.join(' AND ')})` : '';
+    })
+    .filter(Boolean);
+  return clauses.length ? `AND (${clauses.join(' OR ')})` : '';
 }
 
 function scoreCatalog(catalog: string, preferred: string[], domainKnowledge: string) {
