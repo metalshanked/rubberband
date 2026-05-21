@@ -1470,7 +1470,8 @@ input {
 
 .pending {
   display: inline-flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   min-height: 32px;
   max-width: min(860px, calc(100vw - 156px));
   gap: 8px;
@@ -1479,10 +1480,18 @@ input {
 }
 
 .pending.expanded {
-  align-items: flex-start;
+  width: min(860px, calc(100vw - 156px));
+}
+
+.pendingSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .pendingText {
+  flex: 1 1 auto;
   max-width: min(680px, calc(100vw - 240px));
   overflow: hidden;
   color: #5d6976;
@@ -1493,7 +1502,7 @@ input {
 }
 
 .pending.expanded .pendingText {
-  max-width: min(760px, calc(100vw - 240px));
+  max-width: none;
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
@@ -1526,6 +1535,143 @@ input {
 .pendingCancel:hover {
   border-color: #9aa8b7;
   background: #f2f5f8;
+}
+
+.pendingDetails {
+  display: grid;
+  gap: 8px;
+  max-width: 100%;
+  max-height: min(420px, 48vh);
+  overflow: auto;
+  border-top: 1px solid #dbe2ea;
+  padding-top: 8px;
+  color: #344252;
+}
+
+.pendingDetailsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #4d5a68;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.pendingDetailsNote {
+  margin: 0;
+  color: #6a7786;
+  font-size: 11px;
+}
+
+.pendingTimeline {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pendingStep {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.pendingStepMarker {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #c9d4df;
+  border-radius: 999px;
+  color: #475569;
+  background: #f7fafc;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.pendingStep.error .pendingStepMarker {
+  border-color: #e5a7a7;
+  color: #9a3412;
+  background: #fff5f5;
+}
+
+.pendingStepBody {
+  min-width: 0;
+}
+
+.pendingStepTop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.pendingStepTop strong {
+  overflow-wrap: anywhere;
+  color: #213040;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.pendingStepTop time {
+  color: #7a8795;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.pendingStepBody p {
+  margin: 3px 0 0;
+  color: #647181;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.pendingDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px;
+  margin: 6px 0 0;
+}
+
+.pendingDetailGrid div {
+  min-width: 0;
+  border: 1px solid #dbe3ec;
+  border-radius: 6px;
+  padding: 6px;
+  background: #fbfdff;
+}
+
+.pendingDetailGrid div.block {
+  grid-column: 1 / -1;
+}
+
+.pendingDetailGrid dt {
+  margin: 0 0 3px;
+  color: #607080;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.pendingDetailGrid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #263544;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.pendingDetailGrid pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
 }
 
 .composer {
@@ -1797,7 +1943,7 @@ input {
 
 .appFrame {
   margin-top: 12px;
-  overflow: hidden;
+  overflow: visible;
   background: #fff;
   border: 1px solid #cfd7e1;
   border-radius: 8px;
@@ -1898,6 +2044,16 @@ input {
 
 .appFrameActions {
   flex: 0 0 auto;
+}
+
+.vizExportMenu {
+  position: relative;
+}
+
+.vizExportMenuPanel {
+  top: calc(100% + 6px);
+  min-width: 170px;
+  z-index: 35;
 }
 
 .vizHelperBar {
@@ -2930,5 +3086,16 @@ input {
   .composer {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .pending,
+  .pending.expanded {
+    max-width: calc(100vw - 72px);
+    width: auto;
+  }
+
+  .pendingStepTop,
+  .pendingDetailGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

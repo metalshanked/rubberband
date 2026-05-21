@@ -158,14 +158,14 @@ function createDeepAgentModel(settings: Pick<SettingsAccess, 'get'>) {
   const apiKey = settings.get('OPENAI_API_KEY');
   const baseURL = normalizeOpenAiBaseUrl(settings.get('OPENAI_BASE_URL'));
   const headers = buildDeepAgentHeaders(settings);
-  const temperature = readOptionalNumberSetting(settings, 'OPENAI_TEMPERATURE') ?? 0;
+  const temperature = readOptionalNumberSetting(settings, 'OPENAI_TEMPERATURE');
   const topP = readOptionalNumberSetting(settings, 'OPENAI_TOP_P');
   const maxTokens = readOptionalIntegerSetting(settings, 'OPENAI_MAX_TOKENS');
   const timeout = readOptionalIntegerSetting(settings, 'OPENAI_TIMEOUT_MS') || Number(process.env.DEEP_AGENT_LLM_TIMEOUT_MS || 90_000);
   return new ChatOpenAI({
     model: settings.get('OPENAI_MODEL'),
     apiKey,
-    temperature,
+    ...(temperature === undefined ? {} : { temperature }),
     ...(topP === undefined ? {} : { topP }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
     maxRetries: 1,

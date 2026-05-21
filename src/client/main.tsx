@@ -22,6 +22,7 @@ import {
   Info,
   KeyRound,
   Loader2,
+  Mail,
   Maximize2,
   Minimize2,
   Mic,
@@ -384,6 +385,16 @@ type ServerProgressEvent = {
   at: string;
   level: 'info' | 'debug' | 'error';
   message: string;
+  detail?: Record<string, unknown>;
+};
+
+type ProgressTimelineStep = {
+  key: string;
+  serverId?: number;
+  at: string;
+  level: ServerProgressEvent['level'];
+  message: string;
+  detail?: Record<string, unknown>;
 };
 
 type SubmitOptions = {
@@ -429,6 +440,7 @@ const ACTIVE_CONVERSATION_KEY = 'rubberband.activeConversationId.v1';
 const SIDEBAR_COLLAPSED_KEY = 'rubberband.sidebarCollapsed.v1';
 const SELECTED_MCP_APPS_KEY = 'rubberband.selectedMcpApps.v1';
 const FOCUS_TARGETS_KEY = 'rubberband.focusTargets.v1';
+const PAGE_REFRESH_DRAFT_KEY = 'rubberband.pageRefreshDraft.v1';
 const DEFAULT_INTRO_MESSAGE = 'Ask for a dashboard, SQL chart, Elastic/Kibana workflow, or Trino/Starburst analytics preview.';
 const MAX_STORED_CONVERSATIONS = 24;
 const HISTORY_STORAGE_FULL_NOTICE = 'Browser history storage is full. Current chat still works, but new history may not be saved. Clear all history to recover.';
@@ -437,6 +449,10 @@ const MAX_VIZ_INTERACTIONS_FOR_CONTEXT = 6;
 const MAX_CHAT_ATTACHMENTS = 4;
 const MAX_CHAT_ATTACHMENT_BYTES = 5_000_000;
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
+const MAX_PROGRESS_STEPS = 18;
+const MAX_PROGRESS_DETAIL_ITEMS = 8;
+const MAX_PROGRESS_DETAIL_CHARS = 700;
+const MAX_PROGRESS_DETAIL_VALUE_CHARS = 280;
 const FOCUS_PAGE_SIZE = 50;
 
 function formatDemoIntroMessage(result: DemoResponse) {
@@ -673,6 +689,20 @@ function fallbackFlowHtml() {
   </main>`;
 }
 
+function readPageRefreshDraft() {
+  const draft = window.sessionStorage.getItem(PAGE_REFRESH_DRAFT_KEY) || '';
+  window.sessionStorage.removeItem(PAGE_REFRESH_DRAFT_KEY);
+  return draft;
+}
+
+function rememberPageRefreshDraft(draft: string) {
+  if (draft) {
+    window.sessionStorage.setItem(PAGE_REFRESH_DRAFT_KEY, draft);
+  } else {
+    window.sessionStorage.removeItem(PAGE_REFRESH_DRAFT_KEY);
+  }
+}
+
 function App() {
   const initialChatState = useMemo(() => loadChatState(), []);
   const initialSelectedAppIds = useMemo(() => loadSelectedMcpAppIds(), []);
@@ -695,7 +725,7 @@ function App() {
   const [conversationId, setConversationId] = useState(initialChatState.activeId);
   const [conversationHistory, setConversationHistory] = useState<StoredConversation[]>(initialChatState.conversations);
   const [messages, setMessages] = useState<ChatMessage[]>(initialChatState.messages);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => readPageRefreshDraft());
   const [deepAnalysis, setDeepAnalysis] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
@@ -723,6 +753,7 @@ function App() {
   const [demoRunning, setDemoRunning] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [progressMessage, setProgressMessage] = useState('Starting request');
+  const [progressSteps, setProgressSteps] = useState<ProgressTimelineStep[]>([]);
   const [progressExpanded, setProgressExpanded] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -737,7 +768,23 @@ function App() {
   const toolsByApp = useMemo(() => groupToolsByApp(tools, apps, selectedAppIds), [tools, apps, selectedAppIds]);
   const selectedToolCount = useMemo(() => tools.filter(tool => selectedAppIds.includes(tool.appId)).length, [tools, selectedAppIds]);
   const selectedTool = useMemo(() => (selectedToolKey ? tools.find(tool => toolKey(tool) === selectedToolKey) || null : null), [selectedToolKey, tools]);
-  const progressCanExpand = progressMessage.length > 54;
+  const progressCanExpand = progressSteps.length > 0 || progressMessage.length > 54;
+
+  function beginProgress(message: string) {
+    setProgressMessage(message);
+    setProgressExpanded(false);
+    setProgressSteps([createLocalProgressStep(message)]);
+  }
+
+  function recordProgressEvent(progress: ServerProgressEvent) {
+    setProgressMessage(progress.message);
+    setProgressSteps(current => appendProgressStep(current, progressStepFromServer(progress)));
+  }
+
+  function recordLocalProgress(message: string) {
+    setProgressMessage(message);
+    setProgressSteps(current => appendProgressStep(current, createLocalProgressStep(message)));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -776,7 +823,7 @@ function App() {
     const events = new EventSource(eventUrl);
     const onProgress = (event: MessageEvent<string>) => {
       const progress = JSON.parse(event.data) as ServerProgressEvent;
-      if (progress.level !== 'debug') setProgressMessage(progress.message);
+      if (progress.level !== 'debug') recordProgressEvent(progress);
     };
     events.addEventListener('progress', onProgress as EventListener);
     events.onerror = () => {
@@ -799,10 +846,6 @@ function App() {
   useEffect(() => {
     persistFocusTargets(focusTargets);
   }, [focusTargets]);
-
-  useEffect(() => {
-    setProgressExpanded(false);
-  }, [progressMessage]);
 
   useEffect(() => {
     return () => {
@@ -1036,7 +1079,7 @@ function App() {
     setMessages(nextMessages);
     setBusy(true);
     setError(null);
-    setProgressMessage(options.progressMessage || 'Starting request');
+    beginProgress(options.progressMessage || 'Starting request');
 
     try {
       const result = await api<{ content: string; toolCalls?: RenderableToolCall[]; followUps?: string[]; usage?: unknown }>('/api/chat', {
@@ -1085,7 +1128,7 @@ function App() {
         if (options.cleanupOnAbortMessageId) {
           setMessages(current => current.filter(message => message.id !== options.cleanupOnAbortMessageId));
         }
-        setProgressMessage('Request canceled');
+        recordLocalProgress('Request canceled');
         return { ok: false, aborted: true };
       } else {
         const userError = toUserError(err);
@@ -1100,7 +1143,7 @@ function App() {
 
   function cancelActiveRequest() {
     if (!busy) return;
-    setProgressMessage('Canceling request');
+    recordLocalProgress('Canceling request');
     activeRequestRef.current?.abort();
   }
 
@@ -1154,14 +1197,16 @@ function App() {
   }
 
   async function reloadAppsAndTools() {
-    if (refreshingApps) return;
+    if (refreshingApps || busy) return;
     setRefreshingApps(true);
     setError(null);
     setProgressMessage('Reloading apps and tools');
     try {
       const result = await api<{ apps: AppInfo[]; tools: McpTool[] }>('/api/apps/refresh', { method: 'POST' });
       applyAppsAndTools(result.apps, result.tools);
-      setProgressMessage(`Reloaded ${result.apps.length} apps and ${result.tools.length} tools`);
+      rememberPageRefreshDraft(draft);
+      setProgressMessage(`Reloaded ${result.apps.length} apps and ${result.tools.length} tools; refreshing page`);
+      window.setTimeout(() => window.location.reload(), 80);
     } catch (err) {
       setError(toUserError(err));
     } finally {
@@ -1833,7 +1878,7 @@ function App() {
             <button className="iconButton" onClick={() => setSettingsOpen(true)} title="Settings">
               <Settings size={18} />
             </button>
-            <button className="iconButton" onClick={reloadAppsAndTools} disabled={refreshingApps} title="Reload MCP apps and tools" aria-label="Reload MCP apps and tools">
+            <button className="iconButton" onClick={reloadAppsAndTools} disabled={refreshingApps || busy} title="Reload MCP apps, tools, and page" aria-label="Reload MCP apps, tools, and page">
               {refreshingApps ? <Loader2 className="spin" size={18} /> : <Activity size={18} />}
             </button>
           </div>
@@ -1868,23 +1913,26 @@ function App() {
                 <Bot size={17} />
               </div>
               <div className={`bubble pending ${progressExpanded ? 'expanded' : ''}`}>
-                <Loader2 size={17} className="spin" />
-                {progressCanExpand ? (
-                  <button
-                    className="pendingExpand"
-                    type="button"
-                    onClick={() => setProgressExpanded(value => !value)}
-                    title={progressExpanded ? 'Collapse status' : 'Expand status'}
-                    aria-label={progressExpanded ? 'Collapse status' : 'Expand status'}
-                    aria-expanded={progressExpanded}
-                  >
-                    {progressExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                <div className="pendingSummary">
+                  <Loader2 size={17} className="spin" />
+                  {progressCanExpand ? (
+                    <button
+                      className="pendingExpand"
+                      type="button"
+                      onClick={() => setProgressExpanded(value => !value)}
+                      title={progressExpanded ? 'Hide activity details' : 'Show activity details'}
+                      aria-label={progressExpanded ? 'Hide activity details' : 'Show activity details'}
+                      aria-expanded={progressExpanded}
+                    >
+                      {progressExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                    </button>
+                  ) : null}
+                  <span className="pendingText" title={progressMessage}>{progressMessage}</span>
+                  <button className="pendingCancel" onClick={cancelActiveRequest} title="Cancel request" aria-label="Cancel request">
+                    <X size={14} />
                   </button>
-                ) : null}
-                <span className="pendingText" title={progressMessage}>{progressMessage}</span>
-                <button className="pendingCancel" onClick={cancelActiveRequest} title="Cancel request" aria-label="Cancel request">
-                  <X size={14} />
-                </button>
+                </div>
+                {progressExpanded ? <ProgressTimeline steps={progressSteps} fallbackMessage={progressMessage} /> : null}
               </div>
             </div>
           ) : null}
@@ -2407,6 +2455,49 @@ function FocusLookupField({
         </div>
       </div>
     </label>
+  );
+}
+
+function ProgressTimeline({ steps, fallbackMessage }: { steps: ProgressTimelineStep[]; fallbackMessage: string }) {
+  const visibleSteps = steps.length ? steps.slice(-MAX_PROGRESS_STEPS) : [createLocalProgressStep(fallbackMessage)];
+  const hiddenCount = Math.max(0, steps.length - visibleSteps.length);
+
+  return (
+    <div className="pendingDetails" aria-label="Request activity details">
+      <div className="pendingDetailsHeader">
+        <span>Activity details</span>
+        <span>{steps.length || 1} step{(steps.length || 1) === 1 ? '' : 's'}</span>
+      </div>
+      {hiddenCount ? <p className="pendingDetailsNote">Showing the latest {visibleSteps.length} steps; {hiddenCount} earlier step{hiddenCount === 1 ? '' : 's'} hidden.</p> : null}
+      <ol className="pendingTimeline">
+        {visibleSteps.map((step, index) => {
+          const detailEntries = formatProgressDetailEntries(step.detail);
+          const description = progressStepDescription(step.message, detailEntries.length > 0);
+          return (
+            <li className={`pendingStep ${step.level === 'error' ? 'error' : ''}`} key={step.key}>
+              <div className="pendingStepMarker" aria-hidden="true">{index + 1}</div>
+              <div className="pendingStepBody">
+                <div className="pendingStepTop">
+                  <strong>{step.message}</strong>
+                  <time dateTime={step.at}>{formatProgressStepTime(step.at)}</time>
+                </div>
+                {description ? <p>{description}</p> : null}
+                {detailEntries.length ? (
+                  <dl className="pendingDetailGrid">
+                    {detailEntries.map(entry => (
+                      <div className={entry.block ? 'block' : ''} key={entry.key}>
+                        <dt>{entry.label}</dt>
+                        <dd>{entry.block ? <pre>{entry.value}</pre> : entry.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -3020,9 +3111,12 @@ function McpAppFrame({
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(toolCall.title);
   const [previewReady, setPreviewReady] = useState(false);
+  const [vizExportMenuOpen, setVizExportMenuOpen] = useState(false);
+  const [vizExporting, setVizExporting] = useState<'png' | 'pdf' | 'email' | null>(null);
   const onToolResultUpdateRef = useRef(onToolResultUpdate);
   const sizeChangeTimeoutRef = useRef<number | null>(null);
   const previewPanRef = useRef<{ pointerId: number; startX: number; startY: number; viewX: number; viewY: number } | null>(null);
+  const vizExportMenuRef = useRef<HTMLDivElement>(null);
   const proxy = useMemo(
     () =>
       createBrowserMcpProxy(toolCall.appId, update => {
@@ -3083,6 +3177,22 @@ function McpAppFrame({
       if (sizeChangeTimeoutRef.current) window.clearTimeout(sizeChangeTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!vizExportMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!vizExportMenuRef.current?.contains(event.target as Node)) setVizExportMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setVizExportMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [vizExportMenuOpen]);
 
   const handleSizeChanged = useCallback((params: unknown) => {
     setPreviewReady(true);
@@ -3158,6 +3268,26 @@ function McpAppFrame({
     if (previewPanRef.current?.pointerId === event.pointerId) previewPanRef.current = null;
   }
 
+  async function runVisualizationExport(format: 'png' | 'pdf' | 'email') {
+    if (vizExporting) return;
+    setVizExporting(format);
+    setVizExportMenuOpen(false);
+    try {
+      if (format === 'png') {
+        await exportVisualizationPng(toolCall);
+      } else if (format === 'pdf') {
+        await exportVisualizationPdf(toolCall);
+      } else {
+        await openVisualizationEmail(toolCall);
+      }
+    } catch (error) {
+      console.error(error);
+      window.alert('Could not save this visualization yet. Try again after it finishes loading.');
+    } finally {
+      setVizExporting(null);
+    }
+  }
+
   return (
     <div className={`appFrame ${expanded ? 'expanded' : ''}`} data-export-tool-call-id={toolCall.id}>
       <div className="appFrameHeader">
@@ -3182,6 +3312,35 @@ function McpAppFrame({
           {toolCall.resourceUri ? <code>{toolCall.resourceUri}</code> : null}
         </div>
         <div className="appFrameActions">
+          <div className="vizExportMenu" ref={vizExportMenuRef}>
+            <button
+              className="iconButton appFrameButton"
+              onClick={() => setVizExportMenuOpen(value => !value)}
+              disabled={Boolean(vizExporting)}
+              title="Save visualization"
+              aria-label="Save visualization"
+              aria-haspopup="menu"
+              aria-expanded={vizExportMenuOpen}
+            >
+              {vizExporting ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+            </button>
+            {vizExportMenuOpen ? (
+              <div className="exportMenuPanel vizExportMenuPanel" role="menu">
+                <button type="button" role="menuitem" onClick={() => runVisualizationExport('png')}>
+                  <ImageIcon size={15} />
+                  PNG image
+                </button>
+                <button type="button" role="menuitem" onClick={() => runVisualizationExport('pdf')}>
+                  <FileText size={15} />
+                  PDF report
+                </button>
+                <button type="button" role="menuitem" onClick={() => runVisualizationExport('email')}>
+                  <Mail size={15} />
+                  Open email
+                </button>
+              </div>
+            ) : null}
+          </div>
           <button
             className={`iconButton appFrameButton ${showVizHelpers ? 'active' : ''}`}
             onClick={() => setShowVizHelpers(value => !value)}
@@ -3540,6 +3699,101 @@ function computeCatalogPositions(ids: string[]) {
 
 function truncateLabel(value: string, maxLength: number) {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}...`;
+}
+
+function createLocalProgressStep(message: string): ProgressTimelineStep {
+  return {
+    key: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    at: new Date().toISOString(),
+    level: 'info',
+    message
+  };
+}
+
+function progressStepFromServer(progress: ServerProgressEvent): ProgressTimelineStep {
+  return {
+    key: `server-${progress.id}`,
+    serverId: progress.id,
+    at: progress.at,
+    level: progress.level,
+    message: progress.message,
+    ...(progress.detail ? { detail: progress.detail } : {})
+  };
+}
+
+function appendProgressStep(current: ProgressTimelineStep[], next: ProgressTimelineStep) {
+  const deduped = next.serverId === undefined ? current : current.filter(step => step.serverId !== next.serverId);
+  return [...deduped, next].slice(-MAX_PROGRESS_STEPS * 2);
+}
+
+function formatProgressDetailEntries(detail?: Record<string, unknown>) {
+  if (!detail) return [];
+  return Object.entries(detail)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+    .slice(0, MAX_PROGRESS_DETAIL_ITEMS)
+    .map(([key, value]) => {
+      const formatted = formatProgressDetailValue(value);
+      return {
+        key,
+        label: labelFromCamelCase(key),
+        value: formatted.value,
+        block: formatted.block
+      };
+    })
+    .filter(entry => entry.value);
+}
+
+function formatProgressDetailValue(value: unknown) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return {
+      value: truncateProgressDetail(trimmed, MAX_PROGRESS_DETAIL_VALUE_CHARS),
+      block: trimmed.includes('\n') || trimmed.length > 90
+    };
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return { value: String(value), block: false };
+  }
+  let serialized = '';
+  try {
+    serialized = JSON.stringify(value, null, 2);
+  } catch {
+    serialized = String(value);
+  }
+  return {
+    value: truncateProgressDetail(serialized, MAX_PROGRESS_DETAIL_CHARS),
+    block: true
+  };
+}
+
+function truncateProgressDetail(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 24)).trimEnd()}\n...[truncated for display]`;
+}
+
+function progressStepDescription(message: string, hasDetail: boolean) {
+  if (hasDetail) return '';
+  const normalized = message.toLowerCase();
+  if (normalized.includes('checking llm settings')) return 'Checked chat configuration before choosing the model or fallback path.';
+  if (normalized.includes('discovering mcp tools')) return 'Asked the selected MCP apps for their available read-only tools.';
+  if (normalized.includes('preparing mcp tools')) return 'Prepared selected app tool schemas so the model can choose the next action.';
+  if (/loaded \d+ mcp tools/.test(normalized)) return 'Collected the selected tool list and attached it to this request.';
+  if (normalized.includes('calling llm')) return 'Sent the conversation and available tool schema to the configured model.';
+  if (normalized.includes('sending tool results')) return 'Returned tool output to the model so it can produce the next step or final answer.';
+  if (normalized.includes('llm requested')) return 'The model selected one or more app/tool actions for this request.';
+  if (normalized.startsWith('running ') || normalized.includes(' is profiling ') || normalized.includes(' bounded ') || normalized.includes('summarizing') || normalized.includes('regenerating')) return 'Started this bounded read-only action.';
+  if (normalized.startsWith('received result') || normalized.includes(' received result')) return 'Received output from the action and prepared it for the answer or preview.';
+  if (normalized.includes('rendering')) return 'Prepared the final answer or interactive preview for the chat.';
+  if (normalized === 'done' || normalized.includes('completed')) return 'Finished the active request workflow.';
+  if (normalized.includes('cancel')) return 'Stopped the active request from the browser.';
+  if (normalized.includes('failed')) return 'Captured the failure so Rubberband can explain it or recover where possible.';
+  return 'Recorded this progress checkpoint for the active request.';
+}
+
+function formatProgressStepTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function truncateForPrompt(value: string, maxChars: number) {
@@ -4314,12 +4568,219 @@ async function captureToolCallFrame(toolCall: RenderableToolCall) {
   const frame = [...document.querySelectorAll<HTMLElement>('.appFrame[data-export-tool-call-id]')].find(element => element.dataset.exportToolCallId === toolCall.id);
   if (!frame) return undefined;
   const { toPng } = await import('html-to-image');
-  return toPng(frame, {
-    backgroundColor: '#ffffff',
-    cacheBust: true,
-    pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-    filter: node => !(node instanceof HTMLElement && (node.classList.contains('appFrameActions') || node.classList.contains('bubbleActions')))
-  }).catch(() => undefined);
+  return withExpandedToolCallFrameForCapture(frame, async () =>
+    toPng(frame, {
+      backgroundColor: '#ffffff',
+      cacheBust: true,
+      width: Math.ceil(frame.scrollWidth),
+      height: Math.ceil(frame.scrollHeight),
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+      filter: node => !(node instanceof HTMLElement && (node.classList.contains('appFrameActions') || node.classList.contains('bubbleActions')))
+    }).catch(() => undefined)
+  );
+}
+
+async function withExpandedToolCallFrameForCapture<T>(frame: HTMLElement, capture: () => Promise<T>) {
+  const renderer = frame.querySelector<HTMLElement>('.renderer');
+  const viewport = frame.querySelector<HTMLElement>('.previewViewport');
+  const stage = frame.querySelector<HTMLElement>('.previewStage');
+  const iframe = frame.querySelector<HTMLIFrameElement>('iframe');
+  const fullHeight = measureToolCallContentHeight(frame);
+  const entries = [
+    { element: renderer, props: ['height', 'minHeight', 'overflow'] },
+    { element: viewport, props: ['height', 'minHeight', 'overflow'] },
+    { element: stage, props: ['height', 'minHeight', 'transform'] },
+    { element: iframe, props: ['height', 'transform'] }
+  ] as Array<{ element: HTMLElement | null; props: Array<keyof CSSStyleDeclaration> }>;
+  const previous = entries.map(entry => ({
+    element: entry.element,
+    values: Object.fromEntries(entry.props.map(prop => [prop, entry.element?.style[prop] || ''])) as Record<string, string>
+  }));
+
+  try {
+    if (renderer) {
+      renderer.style.height = `${fullHeight}px`;
+      renderer.style.minHeight = `${fullHeight}px`;
+      renderer.style.overflow = 'visible';
+    }
+    if (viewport) {
+      viewport.style.height = `${fullHeight}px`;
+      viewport.style.minHeight = `${fullHeight}px`;
+      viewport.style.overflow = 'visible';
+    }
+    if (stage) {
+      stage.style.height = `${fullHeight}px`;
+      stage.style.minHeight = `${fullHeight}px`;
+      stage.style.transform = 'none';
+    }
+    if (iframe) {
+      iframe.style.height = `${fullHeight}px`;
+      iframe.style.transform = 'none';
+    }
+    await nextAnimationFrame();
+    await nextAnimationFrame();
+    return await capture();
+  } finally {
+    for (const entry of previous) {
+      if (!entry.element) continue;
+      for (const [prop, value] of Object.entries(entry.values)) {
+        entry.element.style[prop as never] = value as never;
+      }
+    }
+  }
+}
+
+function measureToolCallContentHeight(frame: HTMLElement) {
+  const renderer = frame.querySelector<HTMLElement>('.renderer');
+  const iframe = frame.querySelector<HTMLIFrameElement>('iframe');
+  const iframeContentHeight = measureIframeContentHeight(iframe);
+  const rendererContentHeight = renderer ? Math.max(renderer.scrollHeight, renderer.offsetHeight) : 0;
+  return Math.max(420, Math.ceil(iframeContentHeight || rendererContentHeight || frame.scrollHeight));
+}
+
+function measureIframeContentHeight(iframe: HTMLIFrameElement | null) {
+  try {
+    const doc = iframe?.contentDocument;
+    if (!doc) return 0;
+    const root = doc.documentElement;
+    const body = doc.body;
+    const candidates = [
+      root?.scrollHeight || 0,
+      body?.scrollHeight || 0,
+      root?.offsetHeight || 0,
+      body?.offsetHeight || 0,
+      ...Array.from(doc.body?.children || []).map(child => Math.ceil((child as HTMLElement).offsetTop + (child as HTMLElement).scrollHeight))
+    ];
+    return Math.max(...candidates.filter(Number.isFinite));
+  } catch {
+    return 0;
+  }
+}
+
+function nextAnimationFrame() {
+  return new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+}
+
+async function exportVisualizationPng(toolCall: RenderableToolCall) {
+  const image = await captureSingleVisualizationImage(toolCall);
+  const baseName = singleVisualizationBaseName(toolCall);
+  downloadBlob(exportImageBlob(image), `${baseName}-${formatExportTimestamp(new Date())}.png`);
+}
+
+async function exportVisualizationPdf(toolCall: RenderableToolCall) {
+  const { jsPDF } = await import('jspdf');
+  const image = await captureSingleVisualizationImage(toolCall);
+  const details = buildVisualizationExportDetails(toolCall);
+  const pdf = new jsPDF({ unit: 'pt', format: 'letter' });
+  const margin = 48;
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const contentWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  const writeText = (text: string, size = 10, style: 'normal' | 'bold' = 'normal') => {
+    pdf.setFont('helvetica', style);
+    pdf.setFontSize(size);
+    const lines = pdf.splitTextToSize(toPdfText(text) || ' ', contentWidth) as string[];
+    pdf.text(lines, margin, y);
+    y += lines.length * (size + 4) + 8;
+  };
+
+  writeText(details.title, 18, 'bold');
+  writeText(`Exported ${new Date().toLocaleString()}`, 9);
+  writeText(details.summary, 10);
+  const size = fitImageSize(image, contentWidth, pageHeight - y - margin);
+  pdf.addImage(image.dataUrl, image.mimeType === 'image/jpeg' ? 'JPEG' : 'PNG', margin, y + 6, size.width, size.height);
+  pdf.save(`${singleVisualizationBaseName(toolCall)}-${formatExportTimestamp(new Date())}.pdf`);
+}
+
+async function openVisualizationEmail(toolCall: RenderableToolCall) {
+  const image = await captureSingleVisualizationImage(toolCall);
+  const details = buildVisualizationExportDetails(toolCall);
+  const baseName = singleVisualizationBaseName(toolCall);
+  downloadBlob(exportImageBlob(image), `${baseName}-${formatExportTimestamp(new Date())}.png`);
+  const body = [
+    details.title,
+    '',
+    details.summary,
+    '',
+    'A PNG image of this visualization has been downloaded. Attach it to this email before sending.'
+  ].join('\n');
+  const mailto = `mailto:?subject=${encodeURIComponent(`Rubberband visualization: ${details.title}`)}&body=${encodeURIComponent(body)}`;
+  window.location.href = mailto;
+}
+
+async function captureSingleVisualizationImage(toolCall: RenderableToolCall) {
+  const frameImage = await captureToolCallFrame(toolCall);
+  const embeddedImage = extractImageDataUrls(toolCall.toolResult)[0];
+  const dataUrl = frameImage || embeddedImage;
+  if (!dataUrl) throw new Error('No visualization image was available to export.');
+  return createExportImage(dataUrl, toolCall.title || toolCall.toolName, 1);
+}
+
+function singleVisualizationBaseName(toolCall: RenderableToolCall) {
+  return slugifyFileName(toolCall.title || toolCall.toolName || 'rubberband-visualization');
+}
+
+function buildVisualizationExportDetails(toolCall: RenderableToolCall) {
+  const title = cleanExportText(toolCall.title || formatToolName(toolCall.toolName) || 'Rubberband visualization');
+  const parts = [
+    summarizeVisualizationInput(toolCall.toolInput),
+    summarizeVisualizationResult(toolCall.toolResult),
+    `Source: ${toolCall.appId} / ${toolCall.toolName}`
+  ].filter(Boolean);
+  return {
+    title,
+    summary: parts.join('\n')
+  };
+}
+
+function summarizeVisualizationInput(input: Record<string, unknown>) {
+  const panels = Array.isArray(input.panels) ? input.panels.filter(isRecord) : [];
+  if (panels.length) {
+    const panelLabels = panels
+      .slice(0, 5)
+      .map((panel, index) => {
+        const title = typeof panel.title === 'string' ? panel.title : `Panel ${index + 1}`;
+        const chartType = typeof panel.chartType === 'string' ? panel.chartType : typeof panel.type === 'string' ? panel.type : '';
+        return chartType ? `${title} (${chartType})` : title;
+      })
+      .join(', ');
+    return `Dashboard with ${panels.length} panel${panels.length === 1 ? '' : 's'}: ${panelLabels}${panels.length > 5 ? ', ...' : ''}.`;
+  }
+  const chartType = typeof input.chartType === 'string' ? input.chartType : typeof input.type === 'string' ? input.type : '';
+  const sql = typeof input.sql === 'string' ? input.sql.replace(/\s+/g, ' ').trim() : '';
+  if (chartType && sql) return `${formatToolName(chartType)} visualization generated from SQL: ${truncateLabel(sql, 220)}`;
+  if (chartType) return `${formatToolName(chartType)} visualization.`;
+  if (sql) return `Visualization generated from SQL: ${truncateLabel(sql, 220)}`;
+  return 'Interactive visualization generated in Rubberband.';
+}
+
+function summarizeVisualizationResult(result: unknown) {
+  const text = collectExportResultText(result).join(' ').replace(/\s+/g, ' ').trim();
+  return text ? truncateLabel(text, 420) : '';
+}
+
+function collectExportResultText(value: unknown, seen = new Set<unknown>()): string[] {
+  if (!value || seen.has(value)) return [];
+  if (typeof value === 'string') {
+    if (value.startsWith('data:image/') || /<html|<!doctype/i.test(value)) return [];
+    return [value];
+  }
+  if (typeof value !== 'object') return [];
+  seen.add(value);
+  if (Array.isArray(value)) return value.flatMap(item => collectExportResultText(item, seen));
+  const record = value as Record<string, unknown>;
+  const direct = ['summary', 'description', 'label', 'title', 'text']
+    .map(key => record[key])
+    .filter((item): item is string => typeof item === 'string' && !item.startsWith('data:image/'));
+  if (direct.length) return direct;
+  if (Array.isArray(record.content)) return record.content.flatMap(item => collectExportResultText(item, seen));
+  return [];
+}
+
+function exportImageBlob(image: ExportImage) {
+  return new Blob([image.bytes.buffer as ArrayBuffer], { type: image.mimeType });
 }
 
 async function exportMarkdownZip(messages: ChatMessage[], assets: ExportAssets, title: string, baseName: string) {

@@ -117,6 +117,9 @@ function explainErrorLocally(message: string, context: ExplainContext): ErrorExp
 async function explainErrorWithLlm(message: string, settings: SettingsAccess, context: ExplainContext): Promise<ErrorExplanation | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), readTimeout(settings));
+  const temperature = readOptionalNumberSetting(settings, 'OPENAI_TEMPERATURE');
+  const topP = readOptionalNumberSetting(settings, 'OPENAI_TOP_P');
+  const maxTokens = readOptionalIntegerSetting(settings, 'OPENAI_MAX_TOKENS');
   try {
     const response = await fetchWithMasterTls(settings, resolveChatCompletionsEndpoint(settings.get('OPENAI_BASE_URL')), {
       method: 'POST',
@@ -127,7 +130,9 @@ async function explainErrorWithLlm(message: string, settings: SettingsAccess, co
       },
       body: JSON.stringify({
         model: settings.get('OPENAI_MODEL'),
-        temperature: 0,
+        ...(temperature === undefined ? {} : { temperature }),
+        ...(topP === undefined ? {} : { top_p: topP }),
+        ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
         messages: [
           {
             role: 'system',
@@ -203,6 +208,18 @@ function redactUrl(value: string) {
 function readTimeout(settings: SettingsAccess) {
   const value = Number(settings.get('ERROR_EXPLANATION_TIMEOUT_MS'));
   return Number.isFinite(value) && value > 500 ? value : DEFAULT_TIMEOUT_MS;
+}
+
+function readOptionalNumberSetting(settings: Pick<SettingsAccess, 'get'>, key: string) {
+  const raw = settings.get(key).trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function readOptionalIntegerSetting(settings: Pick<SettingsAccess, 'get'>, key: string) {
+  const value = readOptionalNumberSetting(settings, key);
+  return value === undefined ? undefined : Math.trunc(value);
 }
 
 function resolveChatCompletionsEndpoint(baseUrl: string) {

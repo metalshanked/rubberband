@@ -16,10 +16,11 @@ import {
   isTrinoCatalogMapRequest,
   resolveChatCompletionsEndpoint,
   runChat,
+  serializeMcpToolResultForModel,
   shouldExposeMcpToolToModel,
   summarizeMcpToolResultForDeepAgent
 } from '../../src/server/openai-chat.js';
-import { applyElasticCcsDefaultArgs, buildElasticClustersJson, fieldCapsToFieldList, getCcsFieldsWithFieldCaps, McpRegistry, withKibanaSpace } from '../../src/server/mcp-registry.js';
+import { applyElasticCcsDefaultArgs, buildElasticClustersJson, fieldCapsToFieldList, getCcsFieldsWithFieldCaps, McpRegistry, parseCustomMcpServers, withKibanaSpace } from '../../src/server/mcp-registry.js';
 import { SettingsStore } from '../../src/server/settings.js';
 import { buildElasticProfile } from '../../src/server/elastic-profiler.js';
 import { buildElasticCcsPromptGuidance, normalizeElasticCcsTargets } from '../../src/server/elastic-ccs.js';
@@ -501,6 +502,9 @@ test('uses LLM error explanations with sanitized context only', async () => {
           OPENAI_BASE_URL: 'http://llm.example.test/v1',
           OPENAI_MODEL: 'test-model',
           OPENAI_AUTH_SCHEME: 'Bearer',
+          OPENAI_TEMPERATURE: '1',
+          OPENAI_TOP_P: '0.9',
+          OPENAI_MAX_TOKENS: '300',
           ERROR_EXPLANATION_TIMEOUT_MS: '2000'
         })[key] || '',
       isInsecureTlsEnabled: () => false
@@ -514,6 +518,10 @@ test('uses LLM error explanations with sanitized context only', async () => {
     assert.match(explanation.headline, /Trino preview/);
     assert.doesNotMatch(requestBody, /secret-value/);
     assert.match(requestBody, /\[redacted\]/);
+    const parsedRequest = JSON.parse(requestBody) as Record<string, unknown>;
+    assert.equal(parsedRequest.temperature, 1);
+    assert.equal(parsedRequest.top_p, 0.9);
+    assert.equal(parsedRequest.max_tokens, 300);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -767,6 +775,52 @@ test('MCP exposure policy supports app and tool allowlists', () => {
   );
 });
 
+test('parses custom streamable HTTP MCP servers from settings', () => {
+  const apps = parseCustomMcpServers(
+    mapSettings({
+      MCP_CUSTOM_SERVERS_JSON: JSON.stringify([
+        {
+          id: 'warehouse-tools',
+          name: 'Warehouse Tools',
+          url: 'https://mcp.example.local/mcp',
+          authType: 'bearer',
+          apiKey: 'secret-token',
+          insecureTls: true
+        },
+        {
+          id: 'disabled-tools',
+          url: 'https://disabled.example.local/mcp',
+          enabled: false
+        }
+      ])
+    })
+  );
+
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].id, 'warehouse-tools');
+  assert.equal(apps[0].transport.type, 'http');
+  assert.equal(apps[0].transport.url, 'https://mcp.example.local/mcp');
+  assert.equal(apps[0].transport.headers?.authorization, 'Bearer secret-token');
+  assert.equal(apps[0].transport.insecureTls, true);
+});
+
+test('registry lists custom MCP servers as normal apps', () => {
+  const registry = McpRegistry.fromApps(
+    [],
+    mapSettings({
+      MCP_CUSTOM_SERVERS_JSON: JSON.stringify([{ id: 'custom-search', name: 'Custom Search', url: 'http://127.0.0.1:59999/mcp' }]),
+      MCP_ENABLED_APPS: 'custom-search',
+      MCP_DISABLED_APPS: ''
+    }) as never
+  );
+
+  const apps = registry.listApps();
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].id, 'custom-search');
+  assert.equal(apps[0].name, 'Custom Search');
+  assert.equal((apps[0] as { transport?: unknown }).transport, undefined);
+});
+
 test('model tool exposure hides MCP app-only tools', () => {
   assert.equal(shouldExposeMcpToolToModel({ name: 'app_only' }), false);
   assert.equal(shouldExposeMcpToolToModel({ name: 'render_app', _meta: { visibility: ['app'] } }), false);
@@ -802,6 +856,38 @@ test('deep agent tool result summaries omit bulky UI payloads but keep preview h
   assert.equal(parsed.interactivePreview, true);
   assert.equal(parsed.resourceUri, 'ui://observability/latency.html');
   assert.match(parsed.text, /Observability preview ready/);
+  assert.doesNotMatch(summary, /window\.secret|<script>|<!doctype html/i);
+});
+
+test('normal chat tool result serialization compacts bulky UI payloads', () => {
+  const html = '<!doctype html><html><body><script>window.secret = true</script><main>Preview</main></body></html>';
+  const summary = serializeMcpToolResultForModel(
+    {
+      content: [
+        { type: 'text', text: 'Dashboard preview ready.' },
+        {
+          type: 'resource',
+          resource: {
+            uri: 'ui://dashbuilder/preview.html',
+            mimeType: 'text/html;profile=mcp-app',
+            text: html
+          }
+        }
+      ]
+    },
+    {
+      appId: 'dashbuilder',
+      toolName: 'create_dashboard',
+      displayName: 'Elastic Dashbuilder: create_dashboard',
+      resourceUri: 'ui://dashbuilder/preview.html',
+      hasEmbeddedHtml: true
+    }
+  );
+  const parsed = JSON.parse(summary) as { interactivePreview: boolean; resourceUri: string; text: string };
+
+  assert.equal(parsed.interactivePreview, true);
+  assert.equal(parsed.resourceUri, 'ui://dashbuilder/preview.html');
+  assert.match(parsed.text, /Dashboard preview ready/);
   assert.doesNotMatch(summary, /window\.secret|<script>|<!doctype html/i);
 });
 
@@ -928,6 +1014,61 @@ test('chat responses include suggested follow-ups', async () => {
 
     assert.equal(completionCount, 1);
     assert.ok(result.followUps.length > 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('chat can generate response-specific follow-ups with a second LLM pass', async () => {
+  const previousFetch = globalThis.fetch;
+  let completionCount = 0;
+  let followUpRequestBody: { messages?: Array<{ role: string; content: string }> } | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    completionCount += 1;
+    if (completionCount === 1) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'The northeast region has the highest revenue, while the west has the fastest growth.' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    followUpRequestBody = JSON.parse(String(init?.body || '{}')) as typeof followUpRequestBody;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                followUps: ['Show revenue growth by region.', 'Compare west growth against northeast revenue.', 'Which product lines drive the northeast?']
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const registry = {
+      getSkillGuidance: () => [],
+      listTools: async () => []
+    };
+    const settings = {
+      get: (key: string) =>
+        ({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1/v1',
+          OPENAI_MODEL: 'test-model',
+          OPENAI_AUTH_SCHEME: 'Bearer',
+          OPENAI_FOLLOW_UPS_ENABLED: 'true'
+        })[key] || ''
+    };
+
+    const result = await runChat(registry as never, settings as never, [{ role: 'user', content: 'summarize regional revenue' }]);
+
+    assert.equal(completionCount, 2);
+    assert.deepEqual(result.followUps, ['Show revenue growth by region', 'Compare west growth against northeast revenue', 'Which product lines drive the northeast?']);
+    assert.match(followUpRequestBody?.messages?.[1]?.content || '', /northeast region has the highest revenue/);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -1186,6 +1327,143 @@ test('chat responses expose only the final UI-producing MCP result', async () =>
     assert.equal(result.usage?.completionTokens, 7);
     assert.equal(result.usage?.totalTokens, 37);
     assert.equal(result.usage?.model, 'test-model');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('chat lets the model recover from timed-out MCP tools', async () => {
+  const previousFetch = globalThis.fetch;
+  const requestBodies: Array<{ messages?: Array<{ role: string; content: unknown }> }> = [];
+  let completionCount = 0;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    completionCount += 1;
+    requestBodies.push(JSON.parse(String(init?.body || '{}')));
+    if (completionCount === 1) {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    id: 'call-chart-timeout',
+                    type: 'function',
+                    function: { name: 'dashbuilder__create_chart', arguments: '{"query":"broad dashboard"}' }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'The chart request timed out; try one bounded top-N visualization.' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }) as typeof fetch;
+
+  try {
+    const registry = {
+      getSkillGuidance: () => [],
+      listTools: async () => [
+        {
+          appId: 'dashbuilder',
+          appName: 'Elastic Dashbuilder',
+          name: 'create_chart',
+          inputSchema: { type: 'object' },
+          _meta: { ui: { resourceUri: 'ui://example-mcp-dashbuilder/chart-preview.html' } }
+        }
+      ],
+      callTool: async () => {
+        throw new Error('MCP error -32001: Request timed out with token=secret-value');
+      }
+    };
+    const settings = {
+      get: (key: string) =>
+        ({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1/v1',
+          OPENAI_MODEL: 'test-model',
+          OPENAI_AUTH_SCHEME: 'Bearer'
+        })[key] || ''
+    };
+
+    const result = await runChat(registry as never, settings as never, [{ role: 'user', content: 'make a dashboard' }]);
+    const recoveryMessages = requestBodies[1]?.messages || [];
+    const toolMessage = recoveryMessages.find(message => message.role === 'tool');
+
+    assert.match(result.content, /timed out/i);
+    assert.equal(result.toolCalls.length, 0);
+    assert.ok(toolMessage);
+    assert.match(String(toolMessage?.content || ''), /Request timed out/);
+    assert.match(String(toolMessage?.content || ''), /one narrower read-only tool call/);
+    assert.doesNotMatch(String(toolMessage?.content || ''), /secret-value/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('chat advertises Trino dashboard panels when the visualize tool supports them', async () => {
+  const previousFetch = globalThis.fetch;
+  let requestBody: { tools?: Array<{ function?: { description?: string; parameters?: Record<string, unknown> } }> } | undefined;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestBody = JSON.parse(String(init?.body || '{}'));
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Done' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }) as typeof fetch;
+
+  try {
+    const registry = {
+      getSkillGuidance: () => [],
+      listTools: async () => [
+        {
+          appId: 'mcp-app-trino',
+          appName: 'Trino Visualization',
+          name: 'visualize_query',
+          description: 'Execute SQL and render an interactive visualization.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sql: { type: 'string' },
+              chartType: { type: 'string' },
+              panels: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                    sql: { type: 'string' },
+                    chartType: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          _meta: { ui: { resourceUri: 'ui://mcp-app-trino/chart-preview.html' } }
+        }
+      ],
+      callTool: async () => ({ content: [] })
+    };
+    const settings = {
+      get: (key: string) =>
+        ({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://127.0.0.1/v1',
+          OPENAI_MODEL: 'test-model',
+          OPENAI_AUTH_SCHEME: 'Bearer'
+        })[key] || ''
+    };
+
+    await runChat(registry as never, settings as never, [{ role: 'user', content: 'build a trino dashboard' }], ['mcp-app-trino']);
+
+    const tool = requestBody?.tools?.[0]?.function;
+    assert.match(tool?.description || '', /prefer one visualize_query call with panels/i);
+    assert.ok((tool?.parameters?.properties as Record<string, unknown> | undefined)?.panels);
   } finally {
     globalThis.fetch = previousFetch;
   }

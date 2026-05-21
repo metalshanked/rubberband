@@ -444,6 +444,8 @@ Use `TRINO_*` names for `mcp-app-trino`; `STARBURST_*` names are also passed thr
 - `MCP_DISABLED_TOOLS`: optional comma- or newline-separated denylist of tool patterns. Deny rules win over allow rules.
 - `MCP_READ_ONLY_MODE`: defaults to `true`. Rubberband hides and blocks MCP tools that appear to mutate external systems, and blocks mutating SQL/API arguments at execution time.
 - `MCP_READ_ONLY_TOOL_ALLOWLIST`: optional wildcard list for tool-name false positives. Allowlisted tools are still checked for mutating SQL, HTTP methods, administrative endpoints, and write-like arguments.
+- `MCP_CUSTOM_SERVERS_JSON`: optional JSON array of custom non-UI Streamable HTTP MCP servers. Each entry becomes a normal selectable MCP app and uses the same app/tool allow and deny policy.
+- `MCP_CUSTOM_INSECURE_TLS`: when `true`, allows insecure TLS for custom Streamable HTTP MCP servers. Prefer valid TLS outside local testing.
 - `MCP_EXPOSURE_REPORT_ON_STARTUP`: when `true`, logs an audit report of installed MCP apps, exposed tools, and items hidden by the instance or read-only policy during server startup.
 
 Patterns are case-insensitive shell-style wildcards, not regular expressions. The exposure policy controls what the UI, model tool list, and host-side MCP proxy can use. Read-only mode is a separate Rubberband host guard layered on top. For defense in depth, use upstream credentials that only have read privileges.
@@ -454,6 +456,16 @@ Example: expose only Dashbuilder's selected preview tools and all Trino tools:
 MCP_ENABLED_APPS=dashbuilder,mcp-app-trino
 MCP_ENABLED_TOOLS=dashbuilder:create_chart,mcp-app-trino:*
 ```
+
+Example custom Streamable HTTP MCP server:
+
+```env
+MCP_CUSTOM_SERVERS_JSON=[{"id":"custom-search","name":"Custom Search MCP","url":"https://mcp.example.com/mcp","authType":"bearer","apiKey":"token"}]
+MCP_ENABLED_APPS=custom-search
+MCP_ENABLED_TOOLS=custom-search:*
+```
+
+Supported custom auth forms include `authorization`, `apiKey` with `authType`, `apiKeyHeader`, and a `headers` object. OAuth is not wired yet.
 
 ### MCP Apps
 

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -9,6 +9,7 @@ const workspace = process.cwd();
 const configPath = path.resolve(workspace, process.env.MCP_APPS_CONFIG || 'mcp-apps.json');
 const installRoot = path.resolve(workspace, process.env.MCP_APPS_DIR || 'mcp_apps');
 const outputPath = path.resolve(workspace, process.env.MCP_APPS_OUTPUT || 'mcp-apps.installed.json');
+const windowsShimDir = path.resolve(workspace, '.rubberband', 'installer-shims');
 
 function assertInside(child, parent) {
   const relative = path.relative(parent, child);
@@ -19,10 +20,14 @@ function assertInside(child, parent) {
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const spawnOptions = {
       stdio: 'inherit',
       shell: process.platform === 'win32',
       ...options
+    };
+    spawnOptions.env = buildRunEnv(options.env);
+    const child = spawn(command, args, {
+      ...spawnOptions
     });
     child.on('error', reject);
     child.on('exit', code => {
@@ -33,6 +38,44 @@ function run(command, args, options = {}) {
       }
     });
   });
+}
+
+function buildRunEnv(extraEnv) {
+  if (process.platform !== 'win32') return extraEnv;
+  ensureWindowsCommandShims();
+  const basePath = extraEnv?.PATH || extraEnv?.Path || process.env.PATH || process.env.Path || '';
+  return {
+    ...process.env,
+    ...extraEnv,
+    PATH: `${windowsShimDir}${path.delimiter}${basePath}`,
+    Path: `${windowsShimDir}${path.delimiter}${basePath}`
+  };
+}
+
+function ensureWindowsCommandShims() {
+  mkdirSync(windowsShimDir, { recursive: true });
+  writeFileSync(
+    path.join(windowsShimDir, 'cp.cmd'),
+    ['@echo off', 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cp.ps1" %*'].join('\r\n')
+  );
+  writeFileSync(
+    path.join(windowsShimDir, 'cp.ps1'),
+    [
+      '$ErrorActionPreference = "Stop"',
+      '$recursive = $false',
+      '$paths = @()',
+      'foreach ($arg in $args) {',
+      '  if ($arg -eq "-r" -or $arg -eq "-R" -or $arg -eq "--recursive") { $recursive = $true; continue }',
+      '  $paths += $arg',
+      '}',
+      'if ($paths.Count -lt 2) { throw "cp shim requires at least one source and a destination." }',
+      '$destination = $paths[-1]',
+      '$sources = $paths[0..($paths.Count - 2)]',
+      'foreach ($source in $sources) {',
+      '  Copy-Item -LiteralPath $source -Destination $destination -Recurse:$recursive -Force',
+      '}'
+    ].join('\n')
+  );
 }
 
 async function cleanDirectory(target) {

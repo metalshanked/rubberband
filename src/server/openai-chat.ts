@@ -123,7 +123,12 @@ export async function runChat(
   analyticsProfiles?: AnalyticsProfileReader,
   options: ChatRunOptions = {}
 ) {
-  onProgress('Checking LLM settings');
+  onProgress('Checking LLM settings', {
+    requestMessages: messages.length,
+    selectedApps: appIds?.length || 0,
+    deepAnalysis: options.deepAnalysis === true,
+    focusTargets: options.focusTargets?.length || 0
+  });
   const apiKey = settings.get('OPENAI_API_KEY');
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content || '';
   const analysisTarget = parseDeepAnalysisTarget(latestUserMessage);
@@ -147,9 +152,9 @@ export async function runChat(
   }
 
   if (!apiKey) {
-    onProgress('Discovering MCP tools');
+    onProgress('Discovering MCP tools', { selectedApps: appIds?.length || 0 });
     const tools = await registry.listTools().catch(() => []);
-    onProgress('Waiting for LLM API key');
+    onProgress('Waiting for LLM API key', { discoveredTools: tools.length, requiredSetting: 'OPENAI_API_KEY' });
     const content = 'Set OPENAI_API_KEY to enable model-driven chat. MCP discovery is working; available tools are listed in the sidebar.';
     const toolCalls = [] as RenderableToolCall[];
     return {
@@ -160,9 +165,9 @@ export async function runChat(
     };
   }
 
-  onProgress('Preparing MCP tools');
+  onProgress('Preparing MCP tools', { selectedApps: appIds?.length || 0 });
   const { tools, toolMap } = await buildOpenAiTools(registry, appIds, settings);
-  onProgress(tools.length ? `Loaded ${tools.length} MCP tools` : 'No MCP tools selected');
+  onProgress(tools.length ? `Loaded ${tools.length} MCP tools` : 'No MCP tools selected', { toolCount: tools.length });
   const openAiMessages: OpenAiMessage[] = [
     {
       role: 'system',
@@ -187,19 +192,26 @@ export async function runChat(
   const tokenUsage = createTokenUsageAccumulator(settings.get('OPENAI_MODEL'));
 
   for (let turn = 0; turn < MAX_TOOL_LOOPS; turn += 1) {
-    onProgress(turn === 0 ? 'Calling LLM' : 'Sending tool results to LLM', { turn: turn + 1 });
+    onProgress(turn === 0 ? 'Calling LLM' : 'Sending tool results to LLM', {
+      turn: turn + 1,
+      model: settings.get('OPENAI_MODEL'),
+      messageCount: openAiMessages.length,
+      toolDefinitions: tools.length
+    });
     const completion = await createChatCompletion(settings, openAiMessages, tools);
     tokenUsage.add(completion.usage, completion.model);
     const choice = completion.choices?.[0]?.message;
     if (!choice) throw new Error('Model returned no message');
 
     if (!choice.tool_calls?.length) {
-      onProgress('Rendering final answer');
+      onProgress('Rendering final answer', { turn: turn + 1, toolResults: renderableToolCalls.length });
       finalContent = choice.content || '';
       break;
     }
 
-    onProgress(`LLM requested ${choice.tool_calls.length} tool call${choice.tool_calls.length === 1 ? '' : 's'}`);
+    onProgress(`LLM requested ${choice.tool_calls.length} tool call${choice.tool_calls.length === 1 ? '' : 's'}`, {
+      requestedTools: choice.tool_calls.map(toolCall => toolCall.function.name).slice(0, 8)
+    });
     openAiMessages.push({
       role: 'assistant',
       content: choice.content || null,
@@ -218,14 +230,51 @@ export async function runChat(
         continue;
       }
 
-      onProgress(`Running ${entry.displayName}`);
       const args = parseToolArgs(toolCall.function.arguments);
-      const result = await registry.callTool(entry.appId, entry.toolName, args);
-      onProgress(`Received result from ${entry.displayName}`);
-      const serializedResult = truncate(JSON.stringify(result), MAX_TOOL_RESULT_CHARS);
-      openAiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: serializedResult });
+      onProgress(`Running ${entry.displayName}`, {
+        appId: entry.appId,
+        toolName: entry.toolName,
+        input: summarizeProgressPayload(args)
+      });
+      let result: unknown;
+      try {
+        result = await registry.callTool(entry.appId, entry.toolName, args);
+      } catch (error) {
+        const sanitizedError = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
+        onProgress(`${entry.displayName} failed; asking the model to recover`, {
+          appId: entry.appId,
+          toolName: entry.toolName,
+          error: sanitizedError
+        });
+        openAiMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({
+            ok: false,
+            tool: `${entry.appId}:${entry.toolName}`,
+            error: sanitizedError,
+            guidance:
+              'This MCP tool failed. Do not repeat the same broad call. If useful, try one narrower read-only tool call with explicit bounds such as one visualization, top-N, a concrete index/data view, or a time range; otherwise explain the limitation from available context.'
+          })
+        });
+        continue;
+      }
+      onProgress(`Received result from ${entry.displayName}`, {
+        appId: entry.appId,
+        toolName: entry.toolName,
+        preview: Boolean(entry.resourceUri || readRenderableUiResource(result)),
+        result: summarizeProgressPayload(result)
+      });
 
       const embeddedUiResource = readRenderableUiResource(result);
+      const serializedResult = serializeMcpToolResultForModel(result, {
+        appId: entry.appId,
+        toolName: entry.toolName,
+        displayName: entry.displayName,
+        resourceUri: entry.resourceUri || embeddedUiResource?.resourceUri,
+        hasEmbeddedHtml: Boolean(embeddedUiResource?.html)
+      });
+      openAiMessages.push({ role: 'tool', tool_call_id: toolCall.id, content: serializedResult });
       if (entry.resourceUri || embeddedUiResource) {
         const resourceUri = entry.resourceUri || embeddedUiResource?.resourceUri;
         const renderableToolCall: RenderableToolCall = {
@@ -252,19 +301,24 @@ export async function runChat(
   }
 
   if (!finalContent) {
-    onProgress('Stopped after tool-call limit');
+    onProgress('Stopped after tool-call limit', { maxToolLoops: MAX_TOOL_LOOPS });
     finalContent = latestRenderableToolCall
       ? 'I stopped after reaching the tool-call limit, but the latest generated preview is available below.'
       : 'I reached the tool-call limit before the model produced a final answer.';
   }
 
-  onProgress('Done');
   const toolCalls = latestRenderableToolCall ? [latestRenderableToolCall] : [];
   const usage = tokenUsage.snapshot();
+  const followUps = await generateResponseFollowUps(settings, finalContent, toolCalls, latestUserMessage, onProgress);
+  onProgress('Done', {
+    toolCalls: toolCalls.length,
+    followUps: followUps.length,
+    tokens: usage?.totalTokens
+  });
   return {
     content: finalContent,
     toolCalls,
-    followUps: generateSuggestedFollowUps(finalContent, toolCalls, latestUserMessage),
+    followUps,
     ...(usage ? { usage } : {})
   };
 }
@@ -286,7 +340,7 @@ async function runDeepAgentToolChat(
     return { content, toolCalls, followUps: generateSuggestedFollowUps(content, toolCalls, latestUserMessage) };
   }
 
-  onProgress('Preparing MCP tools for Deep Agent');
+  onProgress('Preparing MCP tools for Deep Agent', { selectedApps: appIds?.length || 0 });
   const { tools: mcpTools, toolMap } = await buildOpenAiTools(registry, appIds, settings);
   const renderableToolCalls: RenderableToolCall[] = [];
   const renderableToolCallIndexes = new Map<string, number>();
@@ -311,7 +365,12 @@ async function runDeepAgentToolChat(
           });
         }
         toolRunCount += 1;
-        onProgress(`Deep Agent running ${entry.displayName}`);
+        onProgress(`Deep Agent running ${entry.displayName}`, {
+          appId: entry.appId,
+          toolName: entry.toolName,
+          input: summarizeProgressPayload(args),
+          toolRun: toolRunCount
+        });
         let result: unknown;
         try {
           result = await registry.callTool(entry.appId, entry.toolName, args);
@@ -323,7 +382,12 @@ async function runDeepAgentToolChat(
             guidance: 'This MCP tool failed. Try another selected read-only tool if useful, otherwise explain the limitation and answer from available context.'
           });
         }
-        onProgress(`Deep Agent received result from ${entry.displayName}`);
+        onProgress(`Deep Agent received result from ${entry.displayName}`, {
+          appId: entry.appId,
+          toolName: entry.toolName,
+          preview: Boolean(entry.resourceUri || readRenderableUiResource(result)),
+          result: summarizeProgressPayload(result)
+        });
 
         const embeddedUiResource = readRenderableUiResource(result);
         if (entry.resourceUri || embeddedUiResource) {
@@ -538,7 +602,7 @@ async function runTrinoCatalogMap(
 
 export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '', focusContext = '') {
   const base =
-    'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.';
+    'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. Keep visualization and dashboard tool calls bounded: prefer aggregate queries, explicit top-N limits, concrete index/data-view/table targets, and a time range when available. If a broad dashboard request fails or times out, recover with one focused read-only visualization instead of repeating the same broad call. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.';
 
   const skills = registry.getSkillGuidance(appIds);
   const domainSection = domainKnowledge
@@ -644,7 +708,7 @@ async function buildOpenAiTools(registry: McpRegistry, appIds?: string[], settin
       type: 'function',
       function: {
         name: openAiName,
-        description: [String(tool.description || `${toolName} from ${appId}`), ccsGuidance ? `Elastic CCS default: ${ccsGuidance}` : ''].filter(Boolean).join('\n'),
+        description: buildMcpToolDescription(tool, ccsGuidance),
         parameters: normalizeJsonSchema(tool.inputSchema)
       }
     });
@@ -657,6 +721,36 @@ function isElasticMcpTool(tool: Record<string, unknown>) {
   const appId = String(tool.appId || '').toLowerCase();
   const appName = String(tool.appName || '').toLowerCase();
   return appId.includes('elastic') || appName.includes('elastic') || ['dashbuilder', 'security', 'observability'].includes(appId);
+}
+
+function buildMcpToolDescription(tool: Record<string, unknown>, ccsGuidance = '') {
+  const description = [String(tool.description || `${String(tool.name || 'tool')} from ${String(tool.appId || 'app')}`)];
+  if (ccsGuidance) description.push(`Elastic CCS default: ${ccsGuidance}`);
+  if (isTrinoDashboardVizTool(tool)) {
+    description.push(
+      'For multi-panel dashboard requests, prefer one visualize_query call with panels instead of separate chart calls. Each panel can carry its own SQL, chart type, field mappings, sizing, and row limit.'
+    );
+  }
+  return description.filter(Boolean).join('\n');
+}
+
+function isTrinoDashboardVizTool(tool: Record<string, unknown>) {
+  return (
+    String(tool.appId || '').toLowerCase() === 'mcp-app-trino' &&
+    String(tool.name || '').toLowerCase() === 'visualize_query' &&
+    jsonSchemaHasProperty(tool.inputSchema, 'panels')
+  );
+}
+
+function jsonSchemaHasProperty(schema: unknown, propertyName: string): boolean {
+  if (!isRecord(schema)) return false;
+  const properties = schema.properties;
+  if (isRecord(properties) && Object.prototype.hasOwnProperty.call(properties, propertyName)) return true;
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branches = schema[key];
+    if (Array.isArray(branches) && branches.some(branch => jsonSchemaHasProperty(branch, propertyName))) return true;
+  }
+  return false;
 }
 
 function isElasticToolMapEntry(entry: ToolMapEntry) {
@@ -751,6 +845,100 @@ function createTokenUsageAccumulator(defaultModel: string) {
       };
     }
   };
+}
+
+async function generateResponseFollowUps(
+  settings: SettingsAccess,
+  content: string,
+  toolCalls: RenderableToolCall[],
+  request: string,
+  onProgress: ChatProgress = () => undefined
+) {
+  const fallback = generateSuggestedFollowUps(content, toolCalls, request);
+  if (!settings.get('OPENAI_API_KEY') || settings.get('OPENAI_FOLLOW_UPS_ENABLED').toLowerCase() !== 'true') return fallback;
+
+  try {
+    onProgress('Drafting follow-up questions');
+    const completion = await createChatCompletion(
+      settings,
+      [
+        {
+          role: 'system',
+          content: [
+            'You generate short, high-signal follow-up prompts for an analytics chat UI.',
+            'Use the actual user request, assistant response, and tool results. Do not use generic canned questions.',
+            'Return only JSON: {"followUps":["..."]}.',
+            'Rules: 3 or 4 items, each under 90 characters, concrete, actionable, no markdown, no numbering.'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            request: truncate(request, 1000),
+            response: truncate(content, 2600),
+            visualizations: toolCalls.map(toolCall => ({
+              appId: toolCall.appId,
+              toolName: toolCall.toolName,
+              title: toolCall.title,
+              input: summarizeFollowUpToolInput(toolCall.toolInput),
+              resultText: collectMcpResultText(toolCall.toolResult).join('\n').slice(0, 1200)
+            }))
+          })
+        }
+      ],
+      []
+    );
+    const generated = parseModelFollowUps(completion.choices?.[0]?.message?.content || '', request);
+    return generated.length ? generated : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseModelFollowUps(content: string, request = '') {
+  const parsed = parseJsonObjectFromText(content);
+  const raw = Array.isArray(parsed?.followUps) ? parsed.followUps : Array.isArray(parsed?.follow_ups) ? parsed.follow_ups : Array.isArray(parsed?.questions) ? parsed.questions : [];
+  return dedupeFollowUps(
+    raw
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').replace(/\s+/g, ' ').trim())
+      .filter(item => item.length >= 8 && item.length <= 120)
+  )
+    .filter(question => !questionOverlapsRequest(question, request))
+    .slice(0, 4);
+}
+
+function parseJsonObjectFromText(content: string) {
+  const trimmed = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  const candidates = [trimmed, trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1)].filter(candidate => candidate.startsWith('{'));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return undefined;
+}
+
+function summarizeFollowUpToolInput(input: Record<string, unknown>) {
+  const panels = Array.isArray(input.panels) ? input.panels.filter(isRecord) : [];
+  if (panels.length) {
+    return {
+      panels: panels.slice(0, 6).map((panel, index) => ({
+        title: typeof panel.title === 'string' ? panel.title : `Panel ${index + 1}`,
+        chartType: typeof panel.chartType === 'string' ? panel.chartType : typeof panel.type === 'string' ? panel.type : undefined,
+        sql: typeof panel.sql === 'string' ? truncate(panel.sql.replace(/\s+/g, ' ').trim(), 260) : undefined
+      }))
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(input)
+      .filter(([, value]) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+      .slice(0, 12)
+      .map(([key, value]) => [key, typeof value === 'string' ? truncate(value.replace(/\s+/g, ' ').trim(), 260) : value])
+  );
 }
 
 function readTokenUsage(rawUsage: unknown): Omit<TokenUsage, 'model' | 'source'> | undefined {
@@ -910,6 +1098,18 @@ export function summarizeMcpToolResultForDeepAgent(
     }),
     MAX_DEEP_AGENT_RESULT_CHARS
   );
+}
+
+export function serializeMcpToolResultForModel(
+  result: unknown,
+  options: { appId: string; toolName: string; displayName?: string; resourceUri?: string; hasEmbeddedHtml?: boolean }
+) {
+  const raw = JSON.stringify(result) ?? 'null';
+  const hasInteractivePreview = Boolean(options.resourceUri || options.hasEmbeddedHtml);
+  if (!hasInteractivePreview && raw.length <= MAX_TOOL_RESULT_CHARS && !/text\/html;profile=mcp-app|<!doctype html|<html|<script|<body|<main/i.test(raw)) {
+    return raw;
+  }
+  return summarizeMcpToolResultForDeepAgent(result, options);
 }
 
 function collectMcpResultText(value: unknown, seen = new WeakSet<object>()): string[] {
@@ -1303,4 +1503,28 @@ function openAiContentForMessage(message: ChatMessage): string | OpenAiContentPa
 function truncate(value: string, maxChars: number) {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n...[truncated ${value.length - maxChars} chars]`;
+}
+
+function summarizeProgressPayload(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return truncate(value.replace(/\s+/g, ' ').trim(), 220);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return {
+      count: value.length,
+      sample: value.slice(0, 3).map(item => summarizeProgressPayload(item, depth + 1))
+    };
+  }
+  if (!isRecord(value)) return truncate(String(value), 160);
+  if (depth >= 2) return truncate(JSON.stringify(value), 240);
+
+  const entries = Object.entries(value)
+    .filter(([key]) => !isSensitiveProgressKey(key))
+    .slice(0, 8)
+    .map(([key, item]) => [key, summarizeProgressPayload(item, depth + 1)]);
+  return Object.fromEntries(entries);
+}
+
+function isSensitiveProgressKey(key: string) {
+  return /token|secret|password|authorization|api[_-]?key|credential/i.test(key);
 }

@@ -36,6 +36,7 @@ const settingDefs: Array<Omit<SettingField, 'locked' | 'hasValue' | 'value' | 'd
   { key: 'OPENAI_TEMPERATURE', label: 'Temperature', type: 'text', group: 'llm' },
   { key: 'OPENAI_TOP_P', label: 'Top P', type: 'text', group: 'llm' },
   { key: 'OPENAI_MAX_TOKENS', label: 'Max output tokens', type: 'text', group: 'llm' },
+  { key: 'OPENAI_FOLLOW_UPS_ENABLED', label: 'Response-based follow-ups', type: 'checkbox', group: 'llm' },
   { key: 'OPENAI_TIMEOUT_MS', label: 'LLM request timeout ms', type: 'text', group: 'llm' },
   { key: 'OPENAI_EXTRA_HEADERS', label: 'Extra headers JSON', type: 'textarea', group: 'llm', sensitive: true },
   { key: 'OPENAI_EXTRA_BODY', label: 'Extra request body JSON', type: 'textarea', group: 'llm' },
@@ -100,6 +101,8 @@ const settingDefs: Array<Omit<SettingField, 'locked' | 'hasValue' | 'value' | 'd
   { key: 'MCP_DISABLED_TOOLS', label: 'MCP disabled tools', type: 'textarea', group: 'mcp' },
   { key: 'MCP_READ_ONLY_MODE', label: 'MCP read-only mode', type: 'checkbox', group: 'mcp' },
   { key: 'MCP_READ_ONLY_TOOL_ALLOWLIST', label: 'MCP read-only tool allowlist', type: 'textarea', group: 'mcp' },
+  { key: 'MCP_CUSTOM_SERVERS_JSON', label: 'Custom MCP servers JSON', type: 'textarea', group: 'mcp', sensitive: true },
+  { key: 'MCP_CUSTOM_INSECURE_TLS', label: 'Custom MCP insecure TLS', type: 'checkbox', group: 'mcp' },
   { key: 'ANALYTICS_PROFILER_ENABLED', label: 'Analytics profiler enabled', type: 'checkbox', group: 'profiler' },
   { key: 'ANALYTICS_PROFILER_RUN_ON_STARTUP', label: 'Analytics profiler run on startup', type: 'checkbox', group: 'profiler' },
   { key: 'ANALYTICS_PROFILER_TARGETS', label: 'Analytics profiler targets', type: 'text', group: 'profiler' },
@@ -136,6 +139,7 @@ const defaults: Record<string, string> = {
   OPENAI_TEMPERATURE: '',
   OPENAI_TOP_P: '',
   OPENAI_MAX_TOKENS: '',
+  OPENAI_FOLLOW_UPS_ENABLED: 'true',
   OPENAI_TIMEOUT_MS: '90000',
   OPENAI_EXTRA_HEADERS: '',
   OPENAI_EXTRA_BODY: '',
@@ -183,7 +187,9 @@ const defaults: Record<string, string> = {
   MCP_ENABLED_TOOLS: '',
   MCP_DISABLED_TOOLS: '',
   MCP_READ_ONLY_MODE: 'true',
-  MCP_READ_ONLY_TOOL_ALLOWLIST: ''
+  MCP_READ_ONLY_TOOL_ALLOWLIST: '',
+  MCP_CUSTOM_SERVERS_JSON: '',
+  MCP_CUSTOM_INSECURE_TLS: ''
 };
 
 export class SettingsStore {

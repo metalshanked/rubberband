@@ -8,6 +8,8 @@ export type McpTransportConfig =
   | {
       type: 'http';
       url: string;
+      headers?: Record<string, string>;
+      insecureTls?: boolean;
     };
 
 export type InstalledMcpApp = {

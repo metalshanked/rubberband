@@ -43,7 +43,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-security.git",
-        "ref": "86ddc3d743d41a8b42fa51d643d3befc83d99163"
+        "ref": "53a38c69a1ee3b9454a54ce816c3708453560b20"
       },
       "install": [
         ["npm", "install"],
@@ -81,7 +81,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-observability.git",
-        "ref": "cd5f7d936106fdf671fb24ca2b33ac300ee55ed9"
+        "ref": "a8799b7149d483f82c8792fbe6c457ce85a2702e"
       },
       "install": [
         ["npm", "install"],
@@ -147,11 +147,11 @@
     {
       "id": "mcp-app-trino",
       "name": "Trino Visualization",
-      "description": "Query Trino or Starburst and render MCP App previews with Elastic Charts.",
+      "description": "Query Trino or Starburst and render MCP App visualizations or multi-panel dashboards with Elastic Charts.",
       "source": {
         "type": "git",
         "url": "https://github.com/metalshanked/mcp-app-trino.git",
-        "ref": "c46dcf94772ca7b4a1ab41e0b0b8fc52e83999e4"
+        "ref": "f1a0d082f116085e324bf45779c14e3e96db5319"
       },
       "install": [
         ["npm", "install"],

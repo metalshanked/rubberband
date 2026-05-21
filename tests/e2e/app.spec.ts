@@ -5,6 +5,14 @@ import { expect, test } from '@playwright/test';
 const basePath = normalizeBasePath(process.env.BASE_PATH || '');
 const appPath = (path = '/') => `${basePath}${path}`;
 
+function readPngDimensions(bytes: Buffer) {
+  if (bytes.toString('ascii', 1, 4) !== 'PNG') throw new Error('Expected a PNG file.');
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20)
+  };
+}
+
 test('keeps page anchored with composer pinned to the viewport bottom', async ({ page }) => {
   await page.goto(appPath());
   await expect(page.getByText(/MCP apps|LLM-only chat/)).toBeVisible();
@@ -615,6 +623,152 @@ test('hides embedded preview edit controls until preview tools are shown', async
   await expect(appFrame.getByText('Selection dropdown')).toBeVisible();
 });
 
+test('renders Trino multi-panel dashboard visualizations', async ({ page }) => {
+  const dashboardHtml = `<!doctype html>
+<html>
+  <head>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; color: #152033; }
+      main { padding: 18px; }
+      .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .panel { border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; min-height: 160px; background: #fff; }
+      .panel h2 { margin: 0 0 12px; font-size: 18px; }
+      .viz { height: 104px; display: grid; place-items: center; background: #f4f7fb; border-radius: 6px; }
+      .query-panel { margin-bottom: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Revenue dashboard</h1>
+      <div class="query-panel">
+        <button>Edit query</button>
+        <label>Selection dropdown <select><option>month</option></select></label>
+      </div>
+      <section class="dashboard-grid">
+        <article class="panel"><h2>Revenue trend</h2><div class="viz">Line chart rendered</div></article>
+        <article class="panel"><h2>Top customers</h2><div class="viz">Bar chart rendered</div></article>
+      </section>
+    </main>
+    <script>
+      let nextId = 1;
+      function request(method, params) {
+        const id = nextId++;
+        window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+      }
+      request('ui/initialize', {
+        protocolVersion: '2026-01-26',
+        appInfo: { name: 'Trino Visualization', version: '1.0.0' },
+        appCapabilities: {}
+      });
+      window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+    </script>
+  </body>
+</html>`;
+
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: 'Trino dashboard ready',
+        toolCalls: [
+          {
+            id: 'trino-dashboard-1',
+            appId: 'mcp-app-trino',
+            toolName: 'visualize_query',
+            toolInput: {
+              panels: [
+                { title: 'Revenue trend', sql: 'select orderdate, revenue from revenue_by_day', chartType: 'line', width: 6, height: 4 },
+                { title: 'Top customers', sql: 'select name, revenue from top_customers', chartType: 'bar', width: 6, height: 4 }
+              ]
+            },
+            toolResult: { content: [] },
+            html: dashboardHtml,
+            title: 'Trino dashboard'
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('build a two panel trino dashboard');
+  await page.getByTitle('Send').click();
+
+  const frame = page.locator('.appFrame').first();
+  await expect(frame.getByText('Trino dashboard')).toBeVisible();
+  const appFrame = frame.frameLocator('iframe');
+  await expect(appFrame.getByText('Revenue dashboard')).toBeVisible();
+  await expect(appFrame.getByText('Revenue trend')).toBeVisible();
+  await expect(appFrame.getByText('Top customers')).toBeVisible();
+  await expect(appFrame.getByText('Line chart rendered')).toBeVisible();
+  await expect(appFrame.getByText('Bar chart rendered')).toBeVisible();
+  await expect(appFrame.getByText('Edit query')).toBeHidden();
+
+  await frame.getByRole('button', { name: 'Save visualization' }).click();
+  await expect(frame.getByRole('menuitem', { name: 'PNG image' })).toBeVisible();
+  await expect(frame.getByRole('menuitem', { name: 'PDF report' })).toBeVisible();
+  await expect(frame.getByRole('menuitem', { name: 'Open email' })).toBeVisible();
+
+  await frame.getByRole('button', { name: 'Show visualization tools' }).click();
+  await expect(appFrame.getByText('Edit query')).toBeVisible();
+});
+
+test('exports full-height individual visualization PNGs', async ({ page }) => {
+  const tallHtml = `<!doctype html>
+<html>
+  <body style="margin:0;font-family:Arial,sans-serif;color:#152033">
+    <main style="height:1800px;padding:20px;background:#fff">
+      <h1>Tall dashboard</h1>
+      <section style="display:grid;gap:16px">
+        ${Array.from({ length: 8 }, (_, index) => `<article style="height:190px;border:1px solid #d8dee8;border-radius:8px;padding:14px"><h2>Panel ${index + 1}</h2><div>Rendered panel ${index + 1}</div></article>`).join('')}
+      </section>
+      <p style="margin-top:24px">End of dashboard</p>
+    </main>
+    <script>
+      window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+    </script>
+  </body>
+</html>`;
+
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: 'Tall dashboard ready',
+        toolCalls: [
+          {
+            id: 'tall-dashboard-1',
+            appId: 'mcp-app-trino',
+            toolName: 'visualize_query',
+            toolInput: { panels: Array.from({ length: 8 }, (_, index) => ({ title: `Panel ${index + 1}`, chartType: 'bar', sql: 'select 1' })) },
+            toolResult: { content: [{ type: 'text', text: 'Tall dashboard export test.' }] },
+            html: tallHtml,
+            title: 'Tall dashboard'
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show a tall dashboard');
+  await page.getByTitle('Send').click();
+
+  const frame = page.locator('.appFrame').first();
+  await expect(frame.frameLocator('iframe').getByRole('heading', { name: 'Panel 1' })).toBeVisible();
+  await frame.getByRole('button', { name: 'Save visualization' }).click();
+  const downloadPromise = page.waitForEvent('download');
+  await frame.getByRole('menuitem', { name: 'PNG image' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/tall-dashboard-\d{8}-\d{6}\.png$/);
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  const dimensions = readPngDimensions(await fs.readFile(downloadPath!));
+  expect(dimensions.height).toBeGreaterThan(1400);
+});
+
 test('exports chat with visualization assets', async ({ page }) => {
   const previewImage = `data:image/png;base64,${await fs.readFile('public/rubberband-mark-32.png', 'base64')}`;
 
@@ -851,6 +1005,10 @@ test('shows canned action progress and cancels an active generation', async ({ p
   await page.locator('.appFrame').first().getByRole('button', { name: 'Show visualization tools' }).click();
   await page.locator('.appFrame').first().getByRole('button', { name: 'Summarize visualization' }).click();
   await expect(page.getByText('Summarizing visualization')).toBeVisible();
+  await page.getByRole('button', { name: 'Show activity details' }).click();
+  await expect(page.getByText('Activity details')).toBeVisible();
+  await expect(page.getByText('Started this bounded read-only action.')).toBeVisible();
+  expect(await page.evaluate(() => Object.keys(window.localStorage).filter(key => /progress|spinner/i.test(key)))).toEqual([]);
   await expect(page.getByRole('button', { name: 'Cancel request' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Cancel request' }).click();
@@ -1010,18 +1168,31 @@ test('does not expose per-user profiler actions in the chat topbar', async ({ pa
 
 test('reloads MCP apps and tools from the topbar', async ({ page }) => {
   let refreshCalled = false;
+  let appRequestCount = 0;
 
   await page.route('**/api/apps', async route => {
+    appRequestCount += 1;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        apps: [{ id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' }]
+        apps: refreshCalled
+          ? [
+              { id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' },
+              { id: 'mcp-app-trino', name: 'Trino Visualization', status: 'connected' }
+            ]
+          : [{ id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' }]
       })
     });
   });
   await page.route('**/api/tools', async route => {
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tools: [] }) });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        tools: refreshCalled ? [{ appId: 'mcp-app-trino', appName: 'Trino Visualization', name: 'visualize_query', inputSchema: { type: 'object' } }] : []
+      })
+    });
   });
   await page.route('**/api/apps/refresh', async route => {
     refreshCalled = true;
@@ -1041,8 +1212,12 @@ test('reloads MCP apps and tools from the topbar', async ({ page }) => {
 
   await page.goto(appPath());
   await expect(page.locator('.appItem').filter({ hasText: 'Elastic Dashbuilder' })).toBeVisible();
-  await page.getByRole('button', { name: 'Reload MCP apps and tools' }).click();
+  const requestsBeforeReload = appRequestCount;
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('draft survives refresh');
+  await page.getByRole('button', { name: 'Reload MCP apps, tools, and page' }).click();
+  await expect.poll(() => appRequestCount).toBeGreaterThan(requestsBeforeReload);
   await expect(page.locator('.appItem').filter({ hasText: 'Trino Visualization' })).toBeVisible();
+  await expect(page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...')).toHaveValue('draft survives refresh');
   expect(refreshCalled).toBe(true);
 });
 
@@ -1366,7 +1541,20 @@ test('tools section starts collapsed and groups capabilities by app', async ({ p
               type: 'object',
               properties: {
                 sql: { type: 'string' },
-                chartType: { type: 'string', default: 'table' }
+                chartType: { type: 'string', default: 'table' },
+                panels: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      title: { type: 'string' },
+                      sql: { type: 'string' },
+                      chartType: { type: 'string' },
+                      width: { type: 'number' },
+                      height: { type: 'number' }
+                    }
+                  }
+                }
               }
             },
             _meta: { ui: { resourceUri: 'ui://mcp-app-trino/chart-preview.html' } }

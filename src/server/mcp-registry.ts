@@ -24,6 +24,7 @@ type RuntimeApp = InstalledMcpApp & {
   error?: string;
   client?: Client;
   tools?: Array<Record<string, unknown>>;
+  custom?: boolean;
 };
 
 type ExposureTool = {
@@ -50,6 +51,9 @@ type ExposureApp = {
 
 export class McpRegistry {
   private readonly apps = new Map<string, RuntimeApp>();
+  private readonly installedAppIds = new Set<string>();
+  private readonly customAppIds = new Set<string>();
+  private customServersSignature = '';
   private settings?: SettingsAccess;
   private generatedElasticApiKey?: Promise<string | undefined>;
 
@@ -60,8 +64,10 @@ export class McpRegistry {
   constructor(apps: InstalledMcpApp[] = [], settings?: SettingsAccess) {
     this.settings = settings;
     for (const app of apps) {
+      this.installedAppIds.add(app.id);
       this.apps.set(app.id, { ...app, status: 'idle' });
     }
+    this.syncCustomServers();
   }
 
   static async loadApps(manifestPath: string) {
@@ -73,10 +79,12 @@ export class McpRegistry {
   }
 
   listApps() {
-    return this.visibleApps().map(({ client: _client, ...app }) => app);
+    this.syncCustomServers();
+    return this.visibleApps().map(publicAppInfo);
   }
 
   getSkillGuidance(appIds?: string[]) {
+    this.syncCustomServers();
     const selected = appIds?.length ? appIds.map(appId => this.apps.get(appId)).filter(isRuntimeApp) : [...this.apps.values()];
     return selected.filter(app => this.isAppAvailable(app)).flatMap(app =>
       (app.skills || []).map(skill => ({
@@ -88,6 +96,7 @@ export class McpRegistry {
   }
 
   async listTools(appId?: string) {
+    this.syncCustomServers();
     const apps = appId ? [this.getApp(appId)] : this.visibleApps();
     if (appId) this.assertAppAvailable(apps[0]);
     const tools = [];
@@ -110,6 +119,7 @@ export class McpRegistry {
   }
 
   async listExposure() {
+    this.syncCustomServers();
     const apps = [...this.apps.values()];
     const exposedTools: ExposureTool[] = [];
     const hiddenTools: ExposureTool[] = [];
@@ -194,6 +204,7 @@ export class McpRegistry {
   }
 
   async callTool(appId: string, name: string, args: Record<string, unknown>) {
+    this.syncCustomServers();
     const app = this.getApp(appId);
     this.assertAppAvailable(app);
     const client = await this.ensureClient(appId);
@@ -211,24 +222,28 @@ export class McpRegistry {
   }
 
   async readResource(appId: string, uri: string) {
+    this.syncCustomServers();
     this.assertAppAvailable(this.getApp(appId));
     const client = await this.ensureClient(appId);
     return client.readResource({ uri });
   }
 
   async listResources(appId: string, cursor?: string) {
+    this.syncCustomServers();
     this.assertAppAvailable(this.getApp(appId));
     const client = await this.ensureClient(appId);
     return client.listResources({ cursor });
   }
 
   async listResourceTemplates(appId: string, cursor?: string) {
+    this.syncCustomServers();
     this.assertAppAvailable(this.getApp(appId));
     const client = await this.ensureClient(appId);
     return client.listResourceTemplates({ cursor });
   }
 
   async listPrompts(appId: string, cursor?: string) {
+    this.syncCustomServers();
     this.assertAppAvailable(this.getApp(appId));
     const client = await this.ensureClient(appId);
     return client.listPrompts({ cursor });
@@ -321,8 +336,12 @@ export class McpRegistry {
         });
         await client.connect(transport);
       } else {
-        applyMasterTls(this.effectiveTlsSettings());
-        const transport = new StreamableHTTPClientTransport(new URL(app.transport.url));
+        const insecureTls = app.transport.insecureTls || isTruthy(this.settings?.get('MCP_CUSTOM_INSECURE_TLS') || process.env.MCP_CUSTOM_INSECURE_TLS || '');
+        applyMasterTls(insecureTls ? insecureTlsSettings() : this.effectiveTlsSettings());
+        const transport = new StreamableHTTPClientTransport(new URL(app.transport.url), {
+          ...(app.transport.headers ? { requestInit: { headers: app.transport.headers } } : {}),
+          ...(insecureTls ? { fetch: (input, init) => fetchWithMasterTls(insecureTlsSettings(), input, init) } : {})
+        });
         await client.connect(transport);
       }
 
@@ -343,6 +362,26 @@ export class McpRegistry {
     const result = await client.listTools({});
     app.tools = result.tools as Array<Record<string, unknown>>;
     return app.tools;
+  }
+
+  private syncCustomServers() {
+    const customApps = parseCustomMcpServers(this.settings);
+    const signature = JSON.stringify(customApps.map(app => ({ id: app.id, transport: app.transport, name: app.name, description: app.description })));
+    if (signature === this.customServersSignature) return;
+    this.customServersSignature = signature;
+
+    for (const appId of [...this.customAppIds]) {
+      const app = this.apps.get(appId);
+      if (app?.client) void app.client.close().catch(() => undefined);
+      this.apps.delete(appId);
+      this.customAppIds.delete(appId);
+    }
+
+    for (const app of customApps) {
+      if (this.installedAppIds.has(app.id)) throw new Error(`Custom MCP server id conflicts with installed app: ${app.id}`);
+      this.apps.set(app.id, { ...app, status: 'idle', custom: true });
+      this.customAppIds.add(app.id);
+    }
   }
 
   private async findRawTool(app: RuntimeApp, toolName: string) {
@@ -530,12 +569,134 @@ function fallbackTlsSettings() {
   };
 }
 
+function insecureTlsSettings() {
+  return {
+    isInsecureTlsEnabled: () => true
+  };
+}
+
 function isTruthy(value: string) {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }
 
+export function parseCustomMcpServers(settings?: Pick<SettingsAccess, 'get'>): InstalledMcpApp[] {
+  const raw = settings?.get('MCP_CUSTOM_SERVERS_JSON') || process.env.MCP_CUSTOM_SERVERS_JSON || '';
+  if (!raw.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('MCP_CUSTOM_SERVERS_JSON must be valid JSON.');
+  }
+  const entries = Array.isArray(parsed) ? parsed : isPlainRecord(parsed) && Array.isArray(parsed.servers) ? parsed.servers : undefined;
+  if (!entries) throw new Error('MCP_CUSTOM_SERVERS_JSON must be an array or an object with a servers array.');
+  return entries.map(parseCustomMcpServer).filter((app): app is InstalledMcpApp => Boolean(app));
+}
+
+function parseCustomMcpServer(value: unknown): InstalledMcpApp | undefined {
+  if (!isPlainRecord(value)) throw new Error('Each custom MCP server must be an object.');
+  if (value.enabled === false) return undefined;
+  const id = sanitizeCustomMcpId(readString(value.id) || readString(value.name));
+  const url = readString(value.url);
+  if (!id) throw new Error('Each custom MCP server needs an id.');
+  if (!url) throw new Error(`Custom MCP server ${id} needs a url.`);
+  validateCustomMcpUrl(url, id);
+
+  const headers = buildCustomMcpHeaders(value);
+  const name = readString(value.name) || id;
+  const description = readString(value.description) || `Custom Streamable HTTP MCP server at ${redactUrlForDescription(url)}`;
+  return {
+    id,
+    name,
+    description,
+    transport: {
+      type: 'http',
+      url,
+      ...(headers ? { headers } : {}),
+      ...(isTruthy(String(value.insecureTls ?? value.insecureTLS ?? '')) ? { insecureTls: true } : {})
+    }
+  };
+}
+
+function buildCustomMcpHeaders(value: Record<string, unknown>) {
+  const headers: Record<string, string> = {};
+  const rawHeaders = value.headers;
+  if (isPlainRecord(rawHeaders)) {
+    for (const [key, item] of Object.entries(rawHeaders)) {
+      if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') headers[key] = String(item);
+    }
+  }
+
+  const apiKey = readString(value.apiKey) || readString(value.api_key) || readString(value.token) || readString(value.accessToken) || readString(value.access_token);
+  const authHeader = readString(value.authorization) || readString(value.authHeader) || readString(value.auth_header);
+  if (authHeader) {
+    headers.authorization = authHeader;
+  } else if (apiKey) {
+    const authType = (readString(value.authType) || readString(value.auth_type) || 'bearer').toLowerCase();
+    const headerName = readString(value.apiKeyHeader) || readString(value.api_key_header);
+    if (headerName) {
+      headers[headerName] = apiKey;
+    } else if (authType === 'none' || authType === 'raw') {
+      headers.authorization = apiKey;
+    } else if (authType === 'x-api-key' || authType === 'apikey-header') {
+      headers['x-api-key'] = apiKey;
+    } else {
+      headers.authorization = `${authType === 'api_key' || authType === 'apikey' ? 'Bearer' : capitalizeAuthScheme(authType)} ${apiKey}`;
+    }
+  }
+  return Object.keys(headers).length ? headers : undefined;
+}
+
+function validateCustomMcpUrl(url: string, id: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Custom MCP server ${id} has an invalid url.`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`Custom MCP server ${id} must use http or https.`);
+}
+
+function readString(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function sanitizeCustomMcpId(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function redactUrlForDescription(url: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function capitalizeAuthScheme(value: string) {
+  if (!value) return 'Bearer';
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 function isRuntimeApp(app: RuntimeApp | undefined): app is RuntimeApp {
   return Boolean(app);
+}
+
+function publicAppInfo(app: RuntimeApp) {
+  const { client: _client, tools: _tools, transport: _transport, ...publicApp } = app;
+  return publicApp;
 }
 
 async function readInstalledApps(manifestPath: string) {
