@@ -1047,6 +1047,7 @@ input {
   overflow-wrap: anywhere;
 }
 
+.analysisButton,
 .demoButton,
 .exportButton {
   display: inline-flex;
@@ -1062,8 +1063,8 @@ input {
   cursor: pointer;
 }
 
-.demoButton {
-  min-width: 82px;
+.analysisButton {
+  min-width: 112px;
   color: #17324d;
   border-color: #9dc2df;
   background: #eef7ff;
@@ -1073,17 +1074,20 @@ input {
   min-width: 96px;
 }
 
+.analysisButton:hover:not(:disabled),
 .demoButton:hover:not(:disabled) {
   border-color: #6ea9d4;
   background: #dff1ff;
 }
 
+.analysisButton span,
 .demoButton span,
 .exportButton span {
   font-size: 12px;
   font-weight: 700;
 }
 
+.analysisButton:disabled,
 .demoButton:disabled,
 .exportButton:disabled {
   cursor: not-allowed;
@@ -1156,6 +1160,11 @@ input {
 
 .analysisMenuPanel button:hover {
   background: #eef2f5;
+}
+
+.analysisMenuPanel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .iconButton,

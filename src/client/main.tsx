@@ -195,6 +195,30 @@ type DemoResponse = {
   };
 };
 
+type AutoReportResponse = {
+  content: string;
+  toolCalls?: RenderableToolCall[];
+  followUps?: string[];
+  usage?: unknown;
+  report?: {
+    runId: string;
+    scopeMode: 'focused' | 'contextual' | 'open';
+    tokenBudget: number;
+    includedObjects: number;
+    skippedObjects: number;
+    judge: {
+      pass: boolean;
+      issues: Array<{
+        severity: 'high' | 'medium' | 'low';
+        type: string;
+        location?: string;
+        message: string;
+        suggestedFix?: string;
+      }>;
+    };
+  };
+};
+
 type ToolResultUpdate = {
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -749,8 +773,10 @@ function App() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [analysisMenuOpen, setAnalysisMenuOpen] = useState(false);
   const [refreshingApps, setRefreshingApps] = useState(false);
   const [demoRunning, setDemoRunning] = useState(false);
+  const [autoReportRunning, setAutoReportRunning] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [progressMessage, setProgressMessage] = useState('Starting request');
   const [progressSteps, setProgressSteps] = useState<ProgressTimelineStep[]>([]);
@@ -758,6 +784,7 @@ function App() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
+  const analysisMenuRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<RubberbandSpeechRecognition | null>(null);
   const voiceBaseDraftRef = useRef('');
   const finalVoiceTranscriptRef = useRef('');
@@ -877,6 +904,22 @@ function App() {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!analysisMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!analysisMenuRef.current?.contains(event.target as Node)) setAnalysisMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAnalysisMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [analysisMenuOpen]);
 
   useEffect(() => {
     if (!didHydrateChatRef.current) {
@@ -1072,6 +1115,27 @@ function App() {
     setVoiceListening(false);
   }
 
+  function serializedFocusTargets() {
+    return focusTargets.map(target => {
+      if (target.source === 'trino') {
+        return {
+          source: 'trino' as const,
+          catalog: normalizeTrinoFocusPart(target.catalog),
+          schema: normalizeTrinoFocusPart(target.schema),
+          table: normalizeTrinoFocusPart(target.table),
+          tableType: target.tableType,
+          label: target.label
+        };
+      }
+      return {
+        source: 'elastic' as const,
+        indexPattern: target.indexPattern,
+        kind: target.kind,
+        label: target.label
+      };
+    });
+  }
+
   async function submitMessages(nextMessages: ChatMessage[], options: SubmitOptions = {}): Promise<SubmitResult> {
     activeRequestRef.current?.abort();
     const controller = new AbortController();
@@ -1092,24 +1156,7 @@ function App() {
           })),
           appIds: options.appIds ?? selectedAppIds,
           deepAnalysis: options.deepAnalysis ?? deepAnalysis,
-          focusTargets: focusTargets.map(target => {
-            if (target.source === 'trino') {
-              return {
-                source: 'trino',
-                catalog: target.catalog,
-                schema: target.schema,
-                table: target.table,
-                tableType: target.tableType,
-                label: target.label
-              };
-            }
-            return {
-              source: 'elastic',
-              indexPattern: target.indexPattern,
-              kind: target.kind,
-              label: target.label
-            };
-          })
+          focusTargets: serializedFocusTargets()
         })
       });
       const assistantMessage: ChatMessage = {
@@ -1214,8 +1261,54 @@ function App() {
     }
   }
 
+  async function runAutoReport() {
+    if (busy || autoReportRunning) return;
+    activeRequestRef.current?.abort();
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+    setAnalysisMenuOpen(false);
+    setAutoReportRunning(true);
+    setBusy(true);
+    setError(null);
+    beginProgress('Starting Auto Report');
+    try {
+      const result = await api<AutoReportResponse>('/api/auto-report', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify({
+          appIds: selectedAppIds,
+          tokenBudget: readAutoReportTokenBudgetSetting(settingsValues),
+          scopeMode: focusTargets.length ? 'contextual' : 'open',
+          includeWhySection: true,
+          focusTargets: serializedFocusTargets()
+        })
+      });
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: result.content,
+        toolCalls: normalizeRenderableToolCalls(result.toolCalls),
+        followUps: result.followUps || [],
+        usage: normalizeTokenUsage(result.usage)
+      };
+      setMessages(current => [...removeDefaultIntroMessage(current), assistantMessage]);
+      await refresh();
+    } catch (err) {
+      if (isAbortError(err)) {
+        recordLocalProgress('Auto Report canceled');
+      } else {
+        setError(toUserError(err));
+      }
+    } finally {
+      if (activeRequestRef.current === controller) activeRequestRef.current = null;
+      setBusy(false);
+      setAutoReportRunning(false);
+    }
+  }
+
   async function runLiveDemo() {
     if (busy || demoRunning) return;
+    setAnalysisMenuOpen(false);
     setDemoRunning(true);
     setError(null);
     setProgressMessage('Checking live demo readiness');
@@ -1586,7 +1679,6 @@ function App() {
           toolCalls: message.toolCalls.map(toolCall => {
             if (toolCall.id !== toolCallId) return toolCall;
             const nextResourceUri = resourceUri || toolCall.resourceUri;
-            const shouldReloadRenderer = nextResourceUri !== toolCall.resourceUri || html !== toolCall.html;
             return {
               ...toolCall,
               toolName: update.toolName,
@@ -1594,7 +1686,7 @@ function App() {
               toolResult: update.toolResult,
               resourceUri: nextResourceUri,
               html,
-              previewRevision: shouldReloadRenderer ? (toolCall.previewRevision || 0) + 1 : toolCall.previewRevision,
+              previewRevision: (toolCall.previewRevision || 0) + 1,
               title: `${toolCall.appId}: ${update.toolName}`
             };
           })
@@ -1840,10 +1932,33 @@ function App() {
           </div>
           <div className="topbarActions">
             <FocusMenu targets={focusTargets} onAddTarget={addFocusTarget} onRemoveTarget={removeFocusTarget} />
-            <button className="demoButton" onClick={runLiveDemo} disabled={busy || demoRunning} title="Run live demo" aria-label="Run live demo">
-              {demoRunning ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-              <span>Demo</span>
-            </button>
+            <div className="analysisMenu" ref={analysisMenuRef}>
+              <button
+                className="analysisButton"
+                onClick={() => setAnalysisMenuOpen(open => !open)}
+                disabled={busy || demoRunning || autoReportRunning}
+                title="Analyze"
+                aria-label="Analyze"
+                aria-haspopup="menu"
+                aria-expanded={analysisMenuOpen}
+              >
+                {demoRunning || autoReportRunning ? <Loader2 className="spin" size={16} /> : <BarChart3 size={16} />}
+                <span>Analyze</span>
+                <ChevronDown size={14} />
+              </button>
+              {analysisMenuOpen ? (
+                <div className="analysisMenuPanel" role="menu">
+                  <button type="button" role="menuitem" onClick={runAutoReport} disabled={busy || autoReportRunning}>
+                    <FileText size={15} />
+                    <span>Auto Report</span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={runLiveDemo} disabled={busy || demoRunning}>
+                    <Sparkles size={15} />
+                    <span>Demo Analysis</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <div className="exportMenu" ref={exportMenuRef}>
               <button
                 className="exportButton"
@@ -2429,8 +2544,8 @@ function FocusLookupField({
         <div className="focusOptionList" aria-label={`${label} matches`}>
           <button type="button" className={!selected ? 'selected' : ''} onClick={() => onSelect('')} disabled={disabled}>
             <Check size={13} aria-hidden="true" />
-            <span>Auto</span>
-            <em>default</em>
+            <span>*</span>
+            <em>wildcard</em>
           </button>
           {options.map(option => (
             <button
@@ -2957,6 +3072,7 @@ function settingPlaceholder(field: SettingField) {
     TRINO_CLIENT_CERT: '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----',
     TRINO_CLIENT_KEY: '-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----',
     DOMAIN_KNOWLEDGE: 'Example: orders contains commerce events. order_date is the timestamp. status is fulfillment state. total_amount is revenue.',
+    AUTO_REPORT_TOKEN_BUDGET: '8000',
     MCP_ENABLED_APPS: 'dashbuilder, security, observability, mcp-app-trino',
     MCP_DISABLED_APPS: 'experimental-*',
     MCP_ENABLED_TOOLS: 'dashbuilder:*, mcp-app-trino:query, mcp-app-trino:visualize_*',
@@ -3883,7 +3999,13 @@ function renderMessageVizInteractionContext(message: ChatMessage) {
 
 function normalizeRenderableToolCalls(toolCalls?: RenderableToolCall[]) {
   if (!toolCalls?.length) return [];
-  return [toolCalls[toolCalls.length - 1]];
+  const seen = new Set<string>();
+  return toolCalls.filter(toolCall => {
+    const key = `${toolCall.appId}:${toolCall.toolName}:${toolCall.resourceUri || toolCall.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeTokenUsage(usage: unknown): TokenUsage | undefined {
@@ -4304,7 +4426,7 @@ function loadFocusTargets(): FocusTarget[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(FOCUS_TARGETS_KEY) || '[]') as Partial<FocusTarget>[];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isFocusTarget).slice(0, 12);
+    return parsed.filter(isFocusTarget).map(normalizeFocusTarget).slice(0, 12);
   } catch {
     return [];
   }
@@ -4320,8 +4442,32 @@ function persistFocusTargets(targets: FocusTarget[]) {
 
 function isFocusTarget(value: Partial<FocusTarget>): value is FocusTarget {
   if (!value || typeof value.id !== 'string' || typeof value.label !== 'string') return false;
-  if (value.source === 'trino') return true;
+  if (value.source === 'trino') return !hasAutoTrinoFocusPart(value);
   return value.source === 'elastic' && typeof value.indexPattern === 'string';
+}
+
+function hasAutoTrinoFocusPart(target: Partial<Extract<FocusTarget, { source: 'trino' }>>) {
+  return [target.catalog, target.schema, target.table].some(value => value?.trim().toLowerCase() === 'auto');
+}
+
+function normalizeFocusTarget(target: FocusTarget): FocusTarget {
+  if (target.source !== 'trino') return target;
+  const catalog = normalizeTrinoFocusPart(target.catalog);
+  const schema = normalizeTrinoFocusPart(target.schema);
+  const table = normalizeTrinoFocusPart(target.table);
+  return {
+    ...target,
+    catalog,
+    schema,
+    table,
+    label: formatTrinoFocusLabel(catalog || '', schema || '', table || '', target.tableType)
+  };
+}
+
+function normalizeTrinoFocusPart(value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '*') return undefined;
+  return trimmed;
 }
 
 function focusTargetKey(target: FocusTarget) {
@@ -4330,7 +4476,7 @@ function focusTargetKey(target: FocusTarget) {
 }
 
 function formatTrinoFocusLabel(catalog: string, schema: string, table: string, tableType?: string) {
-  const source = [catalog || 'auto', schema || 'auto', table || 'auto'].join('.');
+  const source = [catalog || '*', schema || '*', table || '*'].join('.');
   return tableType ? `${source} (${tableType})` : source;
 }
 
@@ -5459,6 +5605,12 @@ function editableValuesFromSettings(fields: SettingField[], values: Record<strin
         return [field.key, value === (field.defaultValue || '') ? '' : value];
       })
   );
+}
+
+function readAutoReportTokenBudgetSetting(values: Record<string, string>) {
+  const parsed = Number(values.AUTO_REPORT_TOKEN_BUDGET);
+  if (!Number.isFinite(parsed)) return 8000;
+  return Math.min(400_000, Math.max(1500, Math.trunc(parsed)));
 }
 
 async function api<T>(url: string, init: RequestInit = {}): Promise<T> {

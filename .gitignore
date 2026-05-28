@@ -35,6 +35,7 @@ pnpm-debug.log*
 mcp_apps/
 mcp-apps.installed.json
 mcp-apps.local.json
+marketing-site/
 design.md
 
 # Python/local virtual environments

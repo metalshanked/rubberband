@@ -22,13 +22,15 @@ import {
 } from '../../src/server/openai-chat.js';
 import { applyElasticCcsDefaultArgs, buildElasticClustersJson, fieldCapsToFieldList, getCcsFieldsWithFieldCaps, McpRegistry, parseCustomMcpServers, withKibanaSpace } from '../../src/server/mcp-registry.js';
 import { SettingsStore } from '../../src/server/settings.js';
-import { buildElasticProfile } from '../../src/server/elastic-profiler.js';
+import { buildElasticProfile, buildFocusedElasticEvidence, runElasticReadOnlySearch } from '../../src/server/elastic-profiler.js';
 import { buildElasticCcsPromptGuidance, normalizeElasticCcsTargets } from '../../src/server/elastic-ccs.js';
-import { buildTrinoProfile } from '../../src/server/trino-profiler.js';
+import { buildFocusedTrinoEvidence, buildTrinoAutoProbes, buildTrinoProfile, runTrinoReadOnlyProbe } from '../../src/server/trino-profiler.js';
 import { explainError, sanitizeErrorMessage } from '../../src/server/error-explainer.js';
 import { AnalyticsProfileService } from '../../src/server/analytics-profile-service.js';
+import { buildAutoReportPlan, runAutoReport } from '../../src/server/auto-report.js';
 import { testExternalConnection } from '../../src/server/connection-tests.js';
 import { buildDemoPlan } from '../../src/server/demo.js';
+import { runWebSearch } from '../../src/server/web-search.js';
 import {
   assertMcpToolCallAllowed,
   buildMcpReadOnlyPromptGuidance,
@@ -56,7 +58,7 @@ before(async () => {
       MCP_READ_ONLY_TOOL_ALLOWLIST: '',
       OPENAI_API_KEY: 'test-key-from-env',
       OPENAI_BASE_URL: 'http://127.0.0.1:65535/v1/chat/completions',
-      OPENAI_MODEL: 'minimax',
+      OPENAI_MODEL: 'fixture-model',
       ALLOW_INSECURE_TLS: 'true'
     },
     stdio: 'ignore',
@@ -114,7 +116,7 @@ test('BASE_PATH serves app and API under the configured path', async () => {
       MCP_READ_ONLY_TOOL_ALLOWLIST: '',
       OPENAI_API_KEY: 'test-key-from-env',
       OPENAI_BASE_URL: 'http://127.0.0.1:65535/v1/chat/completions',
-      OPENAI_MODEL: 'minimax',
+      OPENAI_MODEL: 'fixture-model',
       ALLOW_INSECURE_TLS: 'true'
     },
     stdio: 'ignore',
@@ -413,6 +415,253 @@ test('analytics profile endpoint exposes shared background status', async () => 
   assert.match(body.trino.status, /idle|running|ready|stale|error|skipped/);
 });
 
+test('settings endpoint exposes Auto Report budget control', async () => {
+  const response = await fetch(`${baseUrl}/api/settings`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { fields: Array<{ key: string; value: string; group: string; type: string }> };
+  const budget = body.fields.find(field => field.key === 'AUTO_REPORT_TOKEN_BUDGET');
+
+  assert.equal(budget?.type, 'text');
+  assert.equal(budget?.group, 'profiler');
+  assert.equal(budget?.value, '8000');
+});
+
+test('settings endpoint exposes optional web search controls under LLM', async () => {
+  const response = await fetch(`${baseUrl}/api/settings`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { fields: Array<{ key: string; value: string; group: string; type: string }> };
+  const enabled = body.fields.find(field => field.key === 'WEB_SEARCH_ENABLED');
+  const baseUrlField = body.fields.find(field => field.key === 'WEB_SEARCH_BASE_URL');
+  const apiKey = body.fields.find(field => field.key === 'WEB_SEARCH_API_KEY');
+  const model = body.fields.find(field => field.key === 'WEB_SEARCH_MODEL');
+
+  assert.equal(enabled?.type, 'checkbox');
+  assert.equal(enabled?.group, 'llm');
+  assert.equal(enabled?.value, 'false');
+  assert.equal(baseUrlField?.type, 'text');
+  assert.equal(baseUrlField?.group, 'llm');
+  assert.equal(apiKey?.type, 'password');
+  assert.equal(apiKey?.group, 'llm');
+  assert.equal(model?.type, 'text');
+  assert.equal(model?.group, 'llm');
+});
+
+test('Auto Report planner honors focus items and token budget', () => {
+  const snapshot = {
+    enabled: true,
+    scheduleMs: 0,
+    staleAfterMs: 0,
+    running: false,
+    elastic: {
+      target: 'elastic',
+      status: 'ready',
+      runCount: 1,
+      profile: {
+        mode: 'deep-analysis',
+        generatedAt: '2026-05-21T12:00:00.000Z',
+        boundedBy: {
+          maxIndices: 10,
+          maxFieldCaps: 3,
+          includeSystem: false,
+          includeDataStreams: true,
+          includedPatterns: [],
+          excludedPatterns: [],
+          crossClusterSearchByDefault: false,
+          crossClusterTargets: []
+        },
+        domainKnowledge: '',
+        totalDiscoveredIndices: 2,
+        totalDiscoveredDataStreams: 0,
+        totalDiscoveredCrossClusterTargets: 0,
+        analyzedIndices: [
+          {
+            name: 'logs-prod',
+            kind: 'index',
+            docs: 1000,
+            system: false,
+            score: 50,
+            domains: ['observability'],
+            timestampFields: ['@timestamp'],
+            keywordFields: ['service.name'],
+            numericFields: ['duration'],
+            notableFields: ['@timestamp', 'service.name', 'duration'],
+            fieldCount: 3,
+            suggestions: [
+              {
+                question: 'Which services have the slowest duration?',
+                action: 'chart',
+                indexPattern: 'logs-prod',
+                confidence: 'high',
+                requiredFields: ['service.name', 'duration'],
+                rationale: 'service and duration fields are present'
+              }
+            ]
+          },
+          {
+            name: 'metrics-dev',
+            kind: 'index',
+            docs: 20,
+            system: false,
+            score: 5,
+            domains: ['observability'],
+            timestampFields: [],
+            keywordFields: [],
+            numericFields: [],
+            notableFields: [],
+            fieldCount: 0,
+            suggestions: []
+          }
+        ],
+        skipped: { systemIndices: 0, emptyIndices: 0, dataStreams: 0, uninspectedIndices: 0, crossClusterTargets: 0 },
+        suggestions: [],
+        caveats: []
+      }
+    },
+    trino: {
+      target: 'trino',
+      status: 'ready',
+      runCount: 1,
+      profile: {
+        mode: 'deep-analysis',
+        generatedAt: '2026-05-21T12:00:00.000Z',
+        connectionLabel: 'Trino test',
+        boundedBy: { maxCatalogs: 2, maxTablesPerCatalog: 10, maxColumnsPerCatalog: 50 },
+        domainKnowledge: '',
+        catalogs: ['warehouse'],
+        analyzedTables: [
+          {
+            catalog: 'warehouse',
+            schema: 'sales',
+            name: 'orders',
+            type: 'BASE TABLE',
+            columns: [{ schema: 'sales', table: 'orders', name: 'total_amount', type: 'double' }],
+            domains: ['commerce'],
+            timestampColumns: [],
+            dimensionColumns: [],
+            metricColumns: ['total_amount'],
+            suggestions: []
+          }
+        ],
+        skipped: { catalogs: 0, inaccessibleCatalogs: [], uninspectedTables: 0 },
+        suggestions: [],
+        caveats: []
+      }
+    }
+  };
+
+  const plan = buildAutoReportPlan(snapshot as never, {
+    tokenBudget: 1500,
+    scopeMode: 'contextual',
+    focusTargets: [{ source: 'elastic', indexPattern: 'logs-*' }]
+  });
+
+  assert.equal(plan.tokenBudget, 1500);
+  assert.ok(plan.includedObjects.length >= 1);
+  assert.equal(plan.includedObjects[0].id, 'elastic:logs-prod');
+  assert.ok(plan.includedObjects[0].focusMatched);
+  assert.ok(plan.includedObjects.reduce((total, object) => total + object.estimatedTokens, 0) <= plan.contextTokenBudget || plan.includedObjects.length === 1);
+});
+
+test('Auto Report uses selected MCP apps for report visuals', async () => {
+  const llm = await startHttpFixture(async (req, res) => {
+    const body = JSON.parse(await readRequestBody(req)) as { tools?: unknown[] };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (body.tools?.length) {
+      res.end(JSON.stringify({
+        model: 'fixture-model',
+        usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                {
+                  id: 'visual-call-1',
+                  type: 'function',
+                  function: {
+                    name: 'dashbuilder__create_chart',
+                    arguments: JSON.stringify({ title: 'Focused trend chart', indexPattern: 'logs-prod' })
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }));
+      return;
+    }
+
+    const responseText = bodyContainsJudgeRequest(body)
+      ? '{"pass":true,"issues":[]}'
+      : '# Analyst Report\n\n## Visuals and Dashboards\n\n- Focused trend chart is included with this report.';
+    res.end(JSON.stringify({
+      model: 'fixture-model',
+      usage: { prompt_tokens: 12, completion_tokens: 9, total_tokens: 21 },
+      choices: [{ message: { content: responseText } }]
+    }));
+  });
+
+  try {
+    const settings = mapSettings({
+      OPENAI_BASE_URL: llm.url,
+      OPENAI_API_KEY: 'fixture-key',
+      OPENAI_AUTH_SCHEME: 'Bearer',
+      OPENAI_MODEL: 'fixture-model',
+      OPENAI_TIMEOUT_MS: '10000'
+    });
+    const registry = {
+      listTools: async (appId?: string) => {
+        assert.equal(appId, 'dashbuilder');
+        return [
+          {
+            appId: 'dashbuilder',
+            appName: 'Elastic Dashbuilder',
+            name: 'create_chart',
+            description: 'Create an embeddable chart preview.',
+            inputSchema: { type: 'object', properties: { title: { type: 'string' }, indexPattern: { type: 'string' } } },
+            _meta: { ui: { resourceUri: 'ui://dashbuilder/chart.html' } }
+          }
+        ];
+      },
+      callTool: async (appId: string, name: string, args: Record<string, unknown>) => {
+        assert.equal(appId, 'dashbuilder');
+        assert.equal(name, 'create_chart');
+        assert.equal(args.indexPattern, 'logs-prod');
+        return {
+          content: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'ui://dashbuilder/chart.html',
+                mimeType: 'text/html;profile=mcp-app',
+                text: '<!doctype html><html><body><main><h1>Focused trend chart</h1></main></body></html>'
+              }
+            }
+          ]
+        };
+      }
+    };
+    const analyticsProfiles = {
+      snapshot: () => autoReportFixtureSnapshot(),
+      refreshNow: async () => undefined
+    };
+
+    const result = await runAutoReport(
+      registry as never,
+      settings as never,
+      analyticsProfiles as never,
+      { appIds: ['dashbuilder'], tokenBudget: 1500, includeWhySection: true, focusTargets: [{ source: 'elastic', indexPattern: 'logs-*' }] }
+    );
+
+    assert.equal(result.toolCalls.length, 1);
+    assert.equal(result.toolCalls[0].title, 'Focused trend chart');
+    assert.match(result.content, /Visuals and Dashboards/);
+    assert.equal(result.report.visualizations, 1);
+    assert.equal(result.report.supportingArtifacts, 1);
+  } finally {
+    await llm.close();
+  }
+});
+
 test('apps refresh endpoint reconnects and returns apps plus tools', async () => {
   const response = await fetch(`${baseUrl}/api/apps/refresh`, { method: 'POST' });
   assert.equal(response.status, 200);
@@ -622,14 +871,14 @@ async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, patter
 }
 
 test('normalizes LLM base URLs without appending /chat/completions twice', () => {
-  assert.equal(resolveChatCompletionsEndpoint('http://litellm.ai/v1'), 'http://litellm.ai/v1/chat/completions');
+  assert.equal(resolveChatCompletionsEndpoint('http://llm.example.test/v1'), 'http://llm.example.test/v1/chat/completions');
   assert.equal(
-    resolveChatCompletionsEndpoint('http://litellm.ai/v1/chat/completions'),
-    'http://litellm.ai/v1/chat/completions'
+    resolveChatCompletionsEndpoint('http://llm.example.test/v1/chat/completions'),
+    'http://llm.example.test/v1/chat/completions'
   );
 });
 
-test('builds LiteLLM-compatible authorization header schemes', () => {
+test('builds configurable authorization header schemes', () => {
   const bearerSettings = { get: (key: string) => (key === 'OPENAI_AUTH_SCHEME' ? 'Bearer' : 'sk-test') };
   const rawSettings = { get: (key: string) => (key === 'OPENAI_AUTH_SCHEME' ? 'none' : 'sk-test') };
 
@@ -857,6 +1106,113 @@ test('deep agent tool result summaries omit bulky UI payloads but keep preview h
   assert.equal(parsed.resourceUri, 'ui://observability/latency.html');
   assert.match(parsed.text, /Observability preview ready/);
   assert.doesNotMatch(summary, /window\.secret|<script>|<!doctype html/i);
+});
+
+test('web search uses the configured search model and returns structured results', async () => {
+  const previousFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | undefined;
+  let authHeader = '';
+  globalThis.fetch = (async (input, init) => {
+    assert.equal(String(input), 'https://search.example/v1/chat/completions');
+    authHeader = String((init?.headers as Record<string, string>).authorization || '');
+    requestBody = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        model: 'gemini-search',
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: 'Search found current docs.',
+                results: [
+                  {
+                    title: 'Official docs',
+                    url: 'https://example.com/docs',
+                    snippet: 'Current reference.',
+                    source: 'Example'
+                  }
+                ],
+                caveats: []
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const settings = mapSettings({
+      OPENAI_BASE_URL: 'https://llm.example/v1',
+      OPENAI_API_KEY: 'fixture-key',
+      OPENAI_AUTH_SCHEME: 'Bearer',
+      OPENAI_MODEL: 'regular-model',
+      WEB_SEARCH_ENABLED: 'true',
+      WEB_SEARCH_BASE_URL: 'https://search.example/v1',
+      WEB_SEARCH_API_KEY: 'search-key',
+      WEB_SEARCH_AUTH_SCHEME: 'Bearer',
+      WEB_SEARCH_MODEL: 'gemini-search',
+      WEB_SEARCH_MAX_RESULTS: '4'
+    });
+
+    const result = await runWebSearch(settings as never, { query: 'rubberband docs', maxResults: 2 });
+
+    assert.equal(requestBody?.model, 'gemini-search');
+    assert.equal(authHeader, 'Bearer search-key');
+    assert.equal(result.summary, 'Search found current docs.');
+    assert.deepEqual(result.results[0], {
+      title: 'Official docs',
+      url: 'https://example.com/docs',
+      snippet: 'Current reference.',
+      source: 'Example'
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('web search falls back to OpenAI endpoint and key when search-specific settings are blank', async () => {
+  const previousFetch = globalThis.fetch;
+  let authHeader = '';
+  globalThis.fetch = (async (input, init) => {
+    assert.equal(String(input), 'https://llm.example/v1/chat/completions');
+    authHeader = String((init?.headers as Record<string, string>).authorization || '');
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: 'Fallback worked.',
+                results: [{ title: 'Fallback', url: 'https://example.com/fallback', snippet: 'Fallback result.' }],
+                caveats: []
+              })
+            }
+          }
+        ]
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  }) as typeof fetch;
+
+  try {
+    const settings = mapSettings({
+      OPENAI_BASE_URL: 'https://llm.example/v1',
+      OPENAI_API_KEY: 'openai-key',
+      OPENAI_AUTH_SCHEME: 'Bearer',
+      OPENAI_MODEL: 'regular-model',
+      WEB_SEARCH_ENABLED: 'true',
+      WEB_SEARCH_MODEL: 'gemini-search'
+    });
+
+    const result = await runWebSearch(settings as never, { query: 'fallback' });
+
+    assert.equal(authHeader, 'Bearer openai-key');
+    assert.equal(result.summary, 'Fallback worked.');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('normal chat tool result serialization compacts bulky UI payloads', () => {
@@ -1885,6 +2241,356 @@ test('Trino profiler honors focus catalog and schema targets', async () => {
   }
 });
 
+test('focused Trino evidence inspects schema and bounded sample values', async () => {
+  const previousFetch = globalThis.fetch;
+  const statements: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/v1/statement')) {
+      const sql = String(init?.body || '');
+      statements.push(sql);
+      if (sql.includes('SHOW CATALOGS')) {
+        return new Response(JSON.stringify({ data: [['infosecdatalakehouse']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('information_schema.tables')) {
+        return new Response(JSON.stringify({ data: [['app_zafran', 'zafran_findings', 'BASE TABLE']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (sql.includes('information_schema.columns')) {
+        return new Response(
+          JSON.stringify({
+            data: [
+              ['app_zafran', 'zafran_findings', 'finding_id', 'varchar'],
+              ['app_zafran', 'zafran_findings', 'severity', 'varchar'],
+              ['app_zafran', 'zafran_findings', 'cvss_score', 'double'],
+              ['app_zafran', 'zafran_findings', 'created_at', 'timestamp']
+            ]
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (/SELECT /i.test(sql) && sql.includes('"infosecdatalakehouse"."app_zafran"."zafran_findings"') && / LIMIT 20/i.test(sql) && !/GROUP BY/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['2026-05-20T00:00:00Z', 'critical', 9.8, 'F-1']] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/GROUP BY \"severity\"/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['critical', 4], ['high', 2]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          TRINO_HOST: 'trino.test',
+          TRINO_PORT: '8080',
+          TRINO_SCHEME: 'http',
+          TRINO_USER: 'analyst',
+          TRINO_AUTH_TYPE: 'none',
+          TRINO_PROFILER_CACHE_TTL_MS: '0'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const evidence = await buildFocusedTrinoEvidence(settings as never, [
+      { catalog: 'infosecdatalakehouse', schema: 'app_zafran', table: 'zafran_findings' }
+    ]);
+
+    assert.equal(evidence.profile.analyzedTables[0].name, 'zafran_findings');
+    assert.ok(evidence.profile.analyzedTables[0].columns.some(column => column.name === 'cvss_score'));
+    assert.ok(Object.values(evidence.samples[0].sampleRows[0]).includes('critical'));
+    assert.deepEqual(evidence.samples[0].topValues[0].values[0], { value: 'critical', count: 4 });
+    assert.ok(statements.some(statement => statement.includes('FROM "infosecdatalakehouse"."app_zafran"."zafran_findings"')));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('focused Elastic evidence inspects field caps, sample documents, and top values', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const method = String(init?.method || 'GET');
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    requests.push({ url, method, body });
+
+    if (url.includes('/logs-*/_field_caps')) {
+      return new Response(
+        JSON.stringify({
+          fields: {
+            '@timestamp': { date: { type: 'date', aggregatable: true, searchable: true } },
+            severity: { keyword: { type: 'keyword', aggregatable: true, searchable: true } },
+            'host.name': { keyword: { type: 'keyword', aggregatable: true, searchable: true } },
+            risk_score: { double: { type: 'double', aggregatable: true, searchable: true } }
+          }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (url.includes('/logs-*/_search') && method === 'POST' && body?.size === 0) {
+      return new Response(
+        JSON.stringify({
+          aggregations: {
+            top_0: {
+              buckets: [
+                { key: 'critical', doc_count: 5 },
+                { key: 'high', doc_count: 3 }
+              ]
+            }
+          }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (url.includes('/logs-*/_search') && method === 'POST') {
+      return new Response(
+        JSON.stringify({
+          hits: {
+            hits: [
+              {
+                _source: {
+                  '@timestamp': '2026-05-20T00:00:00Z',
+                  severity: 'critical',
+                  host: { name: 'app-1' },
+                  risk_score: 91.5
+                }
+              }
+            ]
+          }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          ELASTICSEARCH_URL: 'http://elastic.test',
+          ELASTICSEARCH_API_KEY: 'fixture-key',
+          DOMAIN_KNOWLEDGE: ''
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const evidence = await buildFocusedElasticEvidence(settings as never, [
+      { name: 'logs-*', kind: 'index' }
+    ]);
+
+    assert.equal(evidence.profile.analyzedIndices[0].name, 'logs-*');
+    assert.ok(evidence.profile.analyzedIndices[0].keywordFields.includes('severity'));
+    assert.equal(evidence.samples[0].sampleDocuments[0].severity, 'critical');
+    assert.equal(evidence.samples[0].sampleDocuments[0]['host.name'], 'app-1');
+    assert.deepEqual(evidence.samples[0].topValues[0].values[0], { value: 'critical', count: 5 });
+    assert.ok(requests.some(request => request.url.includes('/logs-*/_field_caps')));
+    assert.ok(requests.some(request => request.method === 'POST' && request.url.includes('/logs-*/_search')));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Elastic read-only probe caps search bodies and rejects unsafe keys', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    requests.push({ url, body });
+    if (url.includes('/logs-*/_search')) {
+      return new Response(
+        JSON.stringify({
+          hits: {
+            hits: [
+              { _index: 'logs-prod', _id: '1', _source: { severity: 'critical' } }
+            ]
+          },
+          aggregations: { severities: { buckets: [{ key: 'critical', doc_count: 1 }] } }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          ELASTICSEARCH_URL: 'http://elastic.test',
+          ELASTICSEARCH_API_KEY: 'fixture-key'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const result = await runElasticReadOnlySearch(settings as never, 'logs-*', {
+      size: 500,
+      query: { match_all: {} },
+      aggs: { severities: { terms: { field: 'severity', size: 5 } } }
+    }, 25);
+
+    assert.equal(result.hits[0].severity, 'critical');
+    assert.equal(requests[0].body?.size, 25);
+    assert.equal(requests[0].body?.track_total_hits, false);
+    await assert.rejects(
+      () => runElasticReadOnlySearch(settings as never, 'logs-*', { script_fields: { x: { script: 'doc.count' } } }, 10),
+      /unsafe|script_fields/i
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Trino auto probes run bounded read-only analyst queries', async () => {
+  const previousFetch = globalThis.fetch;
+  const statements: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/v1/statement')) {
+      const sql = String(init?.body || '');
+      statements.push(sql);
+      if (/count\(\*\) AS row_count/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [[42]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/min\(\"created_at\"\)/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['2026-05-01T00:00:00Z', '2026-05-21T00:00:00Z', 40]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/GROUP BY \"severity\"/i.test(sql) && /ORDER BY row_count DESC/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['critical', 12], ['high', 9]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/avg\(\"cvss_score\"\)/i.test(sql) && !/GROUP BY/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [[38, 1.2, 9.8, 6.7]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/avg\(\"cvss_score\"\)/i.test(sql) && /GROUP BY \"severity\"/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['critical', 12, 9.1, 9.8], ['high', 9, 7.5, 8.2]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (/date_trunc\('day', \"created_at\"\)/i.test(sql)) {
+        return new Response(JSON.stringify({ data: [['2026-05-21 00:00:00.000', 'critical', 4]] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          TRINO_HOST: 'trino.test',
+          TRINO_PORT: '8080',
+          TRINO_SCHEME: 'http',
+          TRINO_USER: 'analyst',
+          TRINO_AUTH_TYPE: 'none'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const results = await buildTrinoAutoProbes(settings as never, [
+      {
+        catalog: 'infosecdatalakehouse',
+        schema: 'app_zafran',
+        name: 'zafran_findings',
+        columns: [
+          { name: 'severity', type: 'varchar' },
+          { name: 'cvss_score', type: 'double' },
+          { name: 'created_at', type: 'timestamp' }
+        ],
+        timestampColumns: ['created_at'],
+        dimensionColumns: ['severity'],
+        metricColumns: ['cvss_score']
+      }
+    ], { maxProbes: 6, maxRows: 10, rounds: 2 });
+
+    assert.equal(results[0].source, 'infosecdatalakehouse.app_zafran.zafran_findings');
+    assert.ok(results[0].probes.some(probe => probe.title === 'Row count' && probe.rows[0].row_count === 42));
+    assert.ok(results[0].probes.some(probe => probe.round === 2 && probe.title === 'cvss_score by severity'));
+    assert.ok(statements.every(statement => /^\s*SELECT\b/i.test(statement)));
+    assert.ok(statements.some(statement => statement.includes('FROM "infosecdatalakehouse"."app_zafran"."zafran_findings"')));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Trino read-only probe wraps SELECT statements and rejects mutations', async () => {
+  const previousFetch = globalThis.fetch;
+  const statements: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/v1/statement')) {
+      const sql = String(init?.body || '');
+      statements.push(sql);
+      return new Response(
+        JSON.stringify({
+          columns: [{ name: 'severity' }, { name: 'row_count' }],
+          data: [['critical', 3]]
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const settings = {
+      get: (key: string) =>
+        ({
+          TRINO_HOST: 'trino.test',
+          TRINO_PORT: '8080',
+          TRINO_SCHEME: 'http',
+          TRINO_USER: 'analyst',
+          TRINO_AUTH_TYPE: 'none'
+        })[key] || '',
+      isInsecureTlsEnabled: () => false
+    };
+
+    const result = await runTrinoReadOnlyProbe(settings as never, 'SELECT severity, count(*) AS row_count FROM "c"."s"."t" GROUP BY severity', 10);
+
+    assert.deepEqual(result.rows[0], { severity: 'critical', row_count: 3 });
+    assert.match(statements[0], /^SELECT \* FROM \(/);
+    assert.match(statements[0], /LIMIT 10$/);
+    await assert.rejects(
+      () => runTrinoReadOnlyProbe(settings as never, 'DROP TABLE "c"."s"."t"', 10),
+      /SELECT|WITH|read-only|DDL|DML/i
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('focused table questions use host-side Trino metadata instead of unrelated profile context', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = (async (input, init) => {
@@ -2210,6 +2916,66 @@ function mapSettings(values: Record<string, string>) {
   return {
     get: (key: string) => values[key] || '',
     isInsecureTlsEnabled: () => false
+  };
+}
+
+function bodyContainsJudgeRequest(body: { messages?: Array<{ content?: string }> }) {
+  return body.messages?.some(message => typeof message.content === 'string' && message.content.includes('Auto Report judge')) || false;
+}
+
+function autoReportFixtureSnapshot() {
+  return {
+    enabled: true,
+    scheduleMs: 0,
+    staleAfterMs: 0,
+    running: false,
+    elastic: {
+      target: 'elastic',
+      status: 'ready',
+      runCount: 1,
+      profile: {
+        mode: 'deep-analysis',
+        generatedAt: '2026-05-21T12:00:00.000Z',
+        boundedBy: {
+          maxIndices: 10,
+          maxFieldCaps: 3,
+          includeSystem: false,
+          includeDataStreams: true,
+          includedPatterns: [],
+          excludedPatterns: [],
+          crossClusterSearchByDefault: false,
+          crossClusterTargets: []
+        },
+        domainKnowledge: '',
+        totalDiscoveredIndices: 1,
+        totalDiscoveredDataStreams: 0,
+        totalDiscoveredCrossClusterTargets: 0,
+        analyzedIndices: [
+          {
+            name: 'logs-prod',
+            kind: 'index',
+            docs: 1000,
+            system: false,
+            score: 50,
+            domains: ['observability'],
+            timestampFields: ['@timestamp'],
+            keywordFields: ['service.name'],
+            numericFields: ['duration'],
+            notableFields: ['@timestamp', 'service.name', 'duration'],
+            fieldCount: 3,
+            suggestions: []
+          }
+        ],
+        skipped: { systemIndices: 0, emptyIndices: 0, dataStreams: 0, uninspectedIndices: 0, crossClusterTargets: 0 },
+        suggestions: [],
+        caveats: []
+      }
+    },
+    trino: {
+      target: 'trino',
+      status: 'idle',
+      runCount: 0
+    }
   };
 }
 

@@ -8,6 +8,7 @@ import type { AnalyticsProfileSnapshot } from './analytics-profile-service.js';
 import { buildElasticCcsPromptGuidance } from './elastic-ccs.js';
 import { buildMcpReadOnlyPromptGuidance } from './mcp-tool-policy.js';
 import { sanitizeErrorMessage } from './error-explainer.js';
+import { isWebSearchEnabled, runWebSearch } from './web-search.js';
 import { tool as langchainTool } from 'langchain';
 import { z } from 'zod';
 
@@ -132,8 +133,9 @@ export async function runChat(
   const apiKey = settings.get('OPENAI_API_KEY');
   const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content || '';
   const analysisTarget = parseDeepAnalysisTarget(latestUserMessage);
-  const focusContext = renderFocusPromptContext(options.focusTargets || []);
-  const trinoFocusTargets = getTrinoFocusTargets(options.focusTargets || []);
+  const focusTargets = normalizeFocusTargets(options.focusTargets || []);
+  const focusContext = renderFocusPromptContext(focusTargets);
+  const trinoFocusTargets = getTrinoFocusTargets(focusTargets);
 
   if (trinoFocusTargets.length && isFocusedTrinoMetadataRequest(latestUserMessage)) {
     return runFocusedTrinoMetadata(settings, latestUserMessage, onProgress, trinoFocusTargets);
@@ -179,7 +181,8 @@ export async function runChat(
         analyticsProfiles?.getPromptContext(),
         buildElasticCcsPromptGuidance(settings),
         buildMcpReadOnlyPromptGuidance(settings),
-        focusContext
+        focusContext,
+        isWebSearchEnabled(settings) ? 'A web_search tool is available for current public web context and source citations. Use it when the answer depends on recent or external information not present in selected data/tools.' : ''
       )
     },
     ...compactChatMessages(messages).map(message => ({ role: message.role, content: openAiContentForMessage(message) }))
@@ -236,9 +239,35 @@ export async function runChat(
         toolName: entry.toolName,
         input: summarizeProgressPayload(args)
       });
+      const invalidSqlPlaceholder = findLiteralAutoSqlPlaceholder(args);
+      if (invalidSqlPlaceholder) {
+        onProgress(`${entry.displayName} blocked invalid focus placeholder`, {
+          appId: entry.appId,
+          toolName: entry.toolName,
+          placeholder: invalidSqlPlaceholder
+        });
+        openAiMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({
+            ok: false,
+            tool: `${entry.appId}:${entry.toolName}`,
+            error: `Invalid SQL object placeholder: ${invalidSqlPlaceholder}`,
+            guidance: 'The focus placeholder is a wildcard, not a SQL identifier. Do not query a table named auto or *. Discover or choose a concrete table/view inside the focused catalog/schema, then retry with that exact object name.'
+          })
+        });
+        continue;
+      }
       let result: unknown;
       try {
-        result = await registry.callTool(entry.appId, entry.toolName, args);
+        result = isWebSearchTool(entry)
+          ? await runWebSearch(settings, {
+              query: String(args.query || ''),
+              reason: typeof args.reason === 'string' ? args.reason : undefined,
+              recencyDays: readOptionalIntegerArg(args.recencyDays),
+              maxResults: readOptionalIntegerArg(args.maxResults)
+            })
+          : await registry.callTool(entry.appId, entry.toolName, args);
       } catch (error) {
         const sanitizedError = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
         onProgress(`${entry.displayName} failed; asking the model to recover`, {
@@ -371,9 +400,25 @@ async function runDeepAgentToolChat(
           input: summarizeProgressPayload(args),
           toolRun: toolRunCount
         });
+        const invalidSqlPlaceholder = findLiteralAutoSqlPlaceholder(args);
+        if (invalidSqlPlaceholder) {
+          return JSON.stringify({
+            ok: false,
+            tool: `${entry.appId}:${entry.toolName}`,
+            error: `Invalid SQL object placeholder: ${invalidSqlPlaceholder}`,
+            guidance: 'The focus placeholder is a wildcard, not a SQL identifier. Do not query a table named auto or *. Discover or choose a concrete table/view inside the focused catalog/schema, then retry with that exact object name.'
+          });
+        }
         let result: unknown;
         try {
-          result = await registry.callTool(entry.appId, entry.toolName, args);
+          result = isWebSearchTool(entry)
+            ? await runWebSearch(settings, {
+                query: String(args.query || ''),
+                reason: typeof args.reason === 'string' ? args.reason : undefined,
+                recencyDays: readOptionalIntegerArg(args.recencyDays),
+                maxResults: readOptionalIntegerArg(args.maxResults)
+              })
+            : await registry.callTool(entry.appId, entry.toolName, args);
         } catch (error) {
           return JSON.stringify({
             ok: false,
@@ -536,7 +581,7 @@ async function runFocusedTrinoMetadata(settings: SettingsAccess, request: string
     return `- \`${table.catalog}.${table.schema}.${table.name}\` (${table.type}${columns})`;
   });
   const focusLabel = focusTargets
-    .map(target => [target.catalog || 'auto catalog', target.schema || 'auto schema', target.table || 'auto table/view'].join('.'))
+    .map(formatTrinoFocusPath)
     .join(', ');
   const boundsLine = profile.skipped.uninspectedTables || profile.skipped.uninspectedColumnTables
     ? `Bounds: skipped ${profile.skipped.uninspectedTables} table(s) and ${profile.skipped.uninspectedColumnTables || 0} column inspection(s).`
@@ -600,7 +645,7 @@ async function runTrinoCatalogMap(
   };
 }
 
-export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '', focusContext = '') {
+export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '', focusContext = '', webSearchGuidance = '') {
   const base =
     'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. Keep visualization and dashboard tool calls bounded: prefer aggregate queries, explicit top-N limits, concrete index/data-view/table targets, and a time range when available. If a broad dashboard request fails or times out, recover with one focused read-only visualization instead of repeating the same broad call. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.';
 
@@ -621,9 +666,10 @@ export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'
     ? `\n\nMCP tool safety:\n${truncate(mcpSafetyGuidance, 2000)}`
     : '';
   const focusSection = focusContext
-    ? `\n\nFocus analysis targets:\n${truncate(focusContext, 3000)}\nPrefer these targets for discovery, profiling, visualizations, and tool calls unless the user explicitly asks to broaden the search. Treat auto targets as a request to choose the best matching catalog, schema, table, view, or index within the selected source.`
+    ? `\n\nFocus analysis targets:\n${truncate(focusContext, 3000)}\nPrefer these targets for discovery, profiling, visualizations, and tool calls unless the user explicitly asks to broaden the search. In Trino / Starburst targets, * is a wildcard placeholder, not a SQL identifier. Never put auto or * in a SQL table path. If a target is catalog.schema.*, first discover or select a concrete table/view in that catalog and schema, then query the exact object.`
     : '';
-  if (!skills.length) return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}`;
+  const webSearchSection = webSearchGuidance ? `\n\nWeb search:\n${truncate(webSearchGuidance, 1000)}` : '';
+  if (!skills.length) return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}${webSearchSection}`;
 
   const grouped = new Map<string, typeof skills>();
   for (const skill of skills) {
@@ -646,18 +692,21 @@ export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'
     );
   }
 
-  return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}${sections.join('')}`;
+  return `${base}${domainSection}${vizSection}${analyticsProfileSection}${elasticCcsSection}${mcpSafetySection}${focusSection}${webSearchSection}${sections.join('')}`;
 }
 
 function renderFocusPromptContext(targets: FocusTarget[]) {
   const lines = targets.map(target => {
     if (target.source === 'trino') {
-      const parts = [target.catalog || 'auto catalog', target.schema || 'auto schema', target.table || 'auto table/view'];
-      return `- Trino / Starburst: ${parts.join('.')} (${target.tableType || 'auto type'})`;
+      return `- Trino / Starburst: ${formatTrinoFocusPath(target)} (${target.tableType || 'any type'})`;
     }
     return `- Elasticsearch: ${target.indexPattern}${target.kind ? ` (${target.kind})` : ''}`;
   });
   return lines.join('\n');
+}
+
+function formatTrinoFocusPath(target: Pick<Extract<FocusTarget, { source: 'trino' }>, 'catalog' | 'schema' | 'table'> | TrinoProfileFocusTarget) {
+  return [target.catalog || '*', target.schema || '*', target.table || '*'].join('.');
 }
 
 function applyFocusContextToProfile(content: string, focusContext = '') {
@@ -714,7 +763,38 @@ async function buildOpenAiTools(registry: McpRegistry, appIds?: string[], settin
     });
   }
 
+  if (settings && isWebSearchEnabled(settings)) {
+    const openAiName = 'rubberband_web_search';
+    toolMap.set(openAiName, {
+      appId: 'rubberband-web',
+      toolName: 'web_search',
+      displayName: 'Web Search'
+    });
+    tools.push({
+      type: 'function',
+      function: {
+        name: openAiName,
+        description:
+          'Search the public web through the configured web-search model when current external information, documentation, news, product details, or source citations are needed. Returns structured results with titles, URLs, snippets, summary, and caveats.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Specific web search query.' },
+            reason: { type: 'string', description: 'Why web search is needed for the current task.' },
+            recencyDays: { type: 'integer', description: 'Optional recency window in days.' },
+            maxResults: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum results to return.' }
+          },
+          required: ['query']
+        }
+      }
+    });
+  }
+
   return { tools, toolMap };
+}
+
+function isWebSearchTool(entry: ToolMapEntry) {
+  return entry.appId === 'rubberband-web' && entry.toolName === 'web_search';
 }
 
 function isElasticMcpTool(tool: Record<string, unknown>) {
@@ -1016,6 +1096,54 @@ function parseToolArgs(raw: string) {
   return parsed as Record<string, unknown>;
 }
 
+function readOptionalIntegerArg(value: unknown) {
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? Math.trunc(numeric) : undefined;
+}
+
+function findLiteralAutoSqlPlaceholder(value: unknown, seen = new WeakSet<object>()): string | undefined {
+  if (typeof value === 'string') {
+    return readLiteralAutoSqlPlaceholder(value);
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findLiteralAutoSqlPlaceholder(item, seen);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'string' && /^(table|tablename|table_name|view|viewname|view_name)$/i.test(key)) {
+      const normalized = item.trim().replace(/^"|"$/g, '').toLowerCase();
+      if (normalized === 'auto' || normalized === '*' || normalized.endsWith('.auto') || normalized.endsWith('."auto"') || normalized.endsWith('.*')) return item;
+    }
+    const found = findLiteralAutoSqlPlaceholder(item, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function readLiteralAutoSqlPlaceholder(value: string) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  const pathMatch = normalized.match(/((?:"[^"]+"|[A-Za-z_][\w$-]*|\*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$-]*|\*)){1,2})/i);
+  if (pathMatch) {
+    const path = pathMatch[1].replace(/\s+/g, '');
+    const parts = path.split('.').map(part => part.replace(/^"|"$/g, '').toLowerCase());
+    const last = parts.at(-1);
+    if (last === 'auto' || last === '*') return path;
+  }
+  if (!/\b(from|join)\b/i.test(normalized)) return undefined;
+  const match = normalized.match(/\b(?:from|join)\s+((?:"[^"]+"|[A-Za-z_][\w$-]*|\*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$-]*|\*)){0,2})/i);
+  if (!match) return undefined;
+  const path = match[1].replace(/\s+/g, '');
+  const parts = path.split('.').map(part => part.replace(/^"|"$/g, '').toLowerCase());
+  const last = parts.at(-1);
+  return last === 'auto' || last === '*' ? path : undefined;
+}
+
 function sanitizeToolName(name: string) {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 }
@@ -1222,12 +1350,35 @@ function getTrinoFocusTargets(targets: FocusTarget[]): TrinoProfileFocusTarget[]
   return targets
     .filter((target): target is Extract<FocusTarget, { source: 'trino' }> => target.source === 'trino')
     .map(target => ({
-      catalog: target.catalog,
-      schema: target.schema,
-      table: target.table,
+      catalog: normalizeTrinoFocusPart(target.catalog),
+      schema: normalizeTrinoFocusPart(target.schema),
+      table: normalizeTrinoFocusPart(target.table),
       tableType: target.tableType
     }))
     .filter(target => target.catalog || target.schema || target.table);
+}
+
+function normalizeFocusTargets(targets: FocusTarget[]): FocusTarget[] {
+  return targets.map(target => {
+    if (target.source !== 'trino') return target;
+    const catalog = normalizeTrinoFocusPart(target.catalog);
+    const schema = normalizeTrinoFocusPart(target.schema);
+    const table = normalizeTrinoFocusPart(target.table);
+    return {
+      ...target,
+      catalog,
+      schema,
+      table,
+      label: target.label || `Trino ${[catalog || '*', schema || '*', table || '*'].join('.')}`
+    };
+  });
+}
+
+function normalizeTrinoFocusPart(value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '*') return undefined;
+  if (trimmed.toLowerCase() === 'auto') throw new Error('Invalid Trino focus target placeholder "auto". Use "*" for wildcard focus targets.');
+  return trimmed;
 }
 
 function parseElasticProfileOptions(content: string) {

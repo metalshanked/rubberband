@@ -5,6 +5,7 @@ export type TrinoProfileOptions = {
   maxCatalogs?: number;
   maxTablesPerCatalog?: number;
   maxColumnsPerCatalog?: number;
+  maxColumnTablesPerCatalog?: number;
   focusTargets?: TrinoProfileFocusTarget[];
 };
 
@@ -93,13 +94,57 @@ export type TrinoProfile = {
   };
 };
 
+export type TrinoFocusedEvidence = {
+  profile: TrinoProfile;
+  samples: Array<{
+    source: string;
+    columns: Array<{ name: string; type: string }>;
+    sampleRows: Array<Record<string, string | number | boolean | null>>;
+    topValues: Array<{
+      column: string;
+      values: Array<{ value: string; count: number }>;
+    }>;
+    notes: string[];
+  }>;
+};
+
+export type TrinoAutoProbeTarget = {
+  catalog: string;
+  schema: string;
+  name: string;
+  columns: Array<{ name: string; type: string }>;
+  timestampColumns: string[];
+  dimensionColumns: string[];
+  metricColumns: string[];
+};
+
+export type TrinoAutoProbeResult = {
+  source: string;
+  probes: Array<{
+    round: number;
+    title: string;
+    sql: string;
+    rows: Array<Record<string, string | number | boolean | null>>;
+    notes: string[];
+  }>;
+};
+
 type TrinoStatementResponse = {
   nextUri?: string;
+  columns?: Array<{ name?: string; type?: string }>;
   data?: unknown[][];
   error?: {
     message?: string;
     errorName?: string;
   };
+};
+
+export type TrinoReadOnlyProbeResult = {
+  sql: string;
+  columns: string[];
+  rows: Array<Record<string, string | number | boolean | null>>;
+  rowCount: number;
+  truncated: boolean;
 };
 
 type TableListing = {
@@ -118,7 +163,7 @@ export async function buildTrinoProfile(settings: SettingsAccess, options: Trino
   const maxCatalogs = clampNumber(options.maxCatalogs, 1, 30, readSettingNumber(settings, 'TRINO_PROFILER_MAX_CATALOGS', 8));
   const maxTablesPerCatalog = clampNumber(options.maxTablesPerCatalog, 1, 200, readSettingNumber(settings, 'TRINO_PROFILER_MAX_TABLES_PER_CATALOG', 30));
   const maxColumnsPerCatalog = clampNumber(options.maxColumnsPerCatalog, 10, 5000, readSettingNumber(settings, 'TRINO_PROFILER_MAX_COLUMNS_PER_CATALOG', 600));
-  const maxColumnTablesPerCatalog = clampNumber(undefined, 0, 200, readSettingNumber(settings, 'TRINO_PROFILER_MAX_COLUMN_TABLES_PER_CATALOG', 12));
+  const maxColumnTablesPerCatalog = clampNumber(options.maxColumnTablesPerCatalog, 0, 200, readSettingNumber(settings, 'TRINO_PROFILER_MAX_COLUMN_TABLES_PER_CATALOG', 12));
   const catalogConcurrency = clampNumber(undefined, 1, 8, readSettingNumber(settings, 'TRINO_PROFILER_CONCURRENCY', 3));
   const cacheTtlMs = clampNumber(undefined, 0, 86_400_000, readSettingNumber(settings, 'TRINO_PROFILER_CACHE_TTL_MS', 86_400_000));
   const includedCatalogs = parseCsvSetting(settings.get('TRINO_PROFILER_INCLUDED_CATALOGS'));
@@ -308,6 +353,245 @@ export function renderTrinoProfile(profile: TrinoProfile) {
   return lines.join('\n');
 }
 
+export async function buildFocusedTrinoEvidence(
+  settings: SettingsAccess,
+  focusTargets: TrinoProfileFocusTarget[],
+  options: {
+    maxTables?: number;
+    maxSampleRows?: number;
+    maxSampleColumns?: number;
+    maxTopValueColumns?: number;
+    maxTopValues?: number;
+  } = {}
+): Promise<TrinoFocusedEvidence> {
+  const maxTables = clampNumber(options.maxTables, 1, 24, 8);
+  const maxSampleRows = clampNumber(options.maxSampleRows, 1, 100, 20);
+  const maxSampleColumns = clampNumber(options.maxSampleColumns, 2, 40, 14);
+  const maxTopValueColumns = clampNumber(options.maxTopValueColumns, 0, 12, 4);
+  const maxTopValues = clampNumber(options.maxTopValues, 1, 30, 8);
+  const profile = await buildTrinoProfile(settings, {
+    maxCatalogs: Math.max(1, new Set(focusTargets.map(target => target.catalog).filter(Boolean)).size || 1),
+    maxTablesPerCatalog: maxTables,
+    maxColumnsPerCatalog: maxTables * maxSampleColumns * 4,
+    maxColumnTablesPerCatalog: maxTables,
+    focusTargets
+  });
+  const client = createTrinoClient(settings);
+  const samples = [];
+
+  for (const table of profile.analyzedTables.slice(0, maxTables)) {
+    const source = `${table.catalog}.${table.schema}.${table.name}`;
+    const selectedColumns = selectEvidenceColumns(table, maxSampleColumns);
+    const notes: string[] = [];
+    let sampleRows: Array<Record<string, string | number | boolean | null>> = [];
+    const topValues: TrinoFocusedEvidence['samples'][number]['topValues'] = [];
+
+    if (!selectedColumns.length) {
+      notes.push('No columns were available for sampling.');
+      samples.push({ source, columns: [], sampleRows, topValues, notes });
+      continue;
+    }
+
+    try {
+      const rows = await client.query(
+        [
+          `SELECT ${selectedColumns.map(column => quoteIdentifier(column.name)).join(', ')}`,
+          `FROM ${quoteQualifiedTable(table.catalog, table.schema, table.name)}`,
+          `LIMIT ${maxSampleRows}`
+        ].join(' ')
+      );
+      sampleRows = rows.map(row => Object.fromEntries(selectedColumns.map((column, index) => [column.name, normalizeSampleValue(row[index])])) as Record<string, string | number | boolean | null>);
+    } catch (error) {
+      notes.push(`Sample row query failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    for (const column of selectTopValueColumns(table, maxTopValueColumns)) {
+      try {
+        const rows = await client.query(
+          [
+            `SELECT ${quoteIdentifier(column)}, count(*) AS value_count`,
+            `FROM ${quoteQualifiedTable(table.catalog, table.schema, table.name)}`,
+            `WHERE ${quoteIdentifier(column)} IS NOT NULL`,
+            `GROUP BY ${quoteIdentifier(column)}`,
+            'ORDER BY value_count DESC',
+            `LIMIT ${maxTopValues}`
+          ].join(' ')
+        );
+        topValues.push({
+          column,
+          values: rows.map(row => ({ value: String(row[0] ?? ''), count: Number(row[1] || 0) || 0 }))
+        });
+      } catch (error) {
+        notes.push(`Top values query failed for ${column}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    samples.push({
+      source,
+      columns: selectedColumns.map(column => ({ name: column.name, type: column.type })),
+      sampleRows,
+      topValues,
+      notes
+    });
+  }
+
+  return { profile, samples };
+}
+
+export async function buildTrinoAutoProbes(
+  settings: SettingsAccess,
+  targets: TrinoAutoProbeTarget[],
+  options: {
+    maxTables?: number;
+    maxProbes?: number;
+    maxRows?: number;
+    rounds?: number;
+  } = {}
+): Promise<TrinoAutoProbeResult[]> {
+  const maxTables = clampNumber(options.maxTables, 1, 40, 12);
+  const maxProbes = clampNumber(options.maxProbes, 1, 80, 24);
+  const maxRows = clampNumber(options.maxRows, 1, 200, 50);
+  const rounds = clampNumber(options.rounds, 1, 3, 2);
+  const client = createTrinoClient(settings);
+  const results: TrinoAutoProbeResult[] = [];
+  let remainingProbes = maxProbes;
+
+  for (const target of targets.slice(0, maxTables)) {
+    if (remainingProbes <= 0) break;
+    const source = `${target.catalog}.${target.schema}.${target.name}`;
+    const probes: TrinoAutoProbeResult['probes'] = [];
+    const table = quoteQualifiedTable(target.catalog, target.schema, target.name);
+    const dimensions = selectProbeColumns(target.dimensionColumns, target.columns, 4, false);
+    const metrics = selectProbeColumns(target.metricColumns, target.columns, 3, true);
+    const timestamp = target.timestampColumns.find(column => hasColumn(target, column));
+
+    const planned = [
+      {
+        round: 1,
+        title: 'Row count',
+        columns: ['row_count'],
+        sql: `SELECT count(*) AS row_count FROM ${table}`
+      },
+      ...(timestamp
+        ? [{
+            round: 1,
+            title: `Time coverage by ${timestamp}`,
+            columns: ['min_time', 'max_time', 'nonnull_rows'],
+            sql: [
+              `SELECT CAST(min(${quoteIdentifier(timestamp)}) AS varchar) AS min_time,`,
+              `CAST(max(${quoteIdentifier(timestamp)}) AS varchar) AS max_time,`,
+              `count(${quoteIdentifier(timestamp)}) AS nonnull_rows`,
+              `FROM ${table}`
+            ].join(' ')
+          }]
+        : []),
+      ...dimensions.slice(0, 3).map(column => ({
+        round: 1,
+        title: `Top values for ${column}`,
+        columns: [column, 'row_count'],
+        sql: [
+          `SELECT ${quoteIdentifier(column)}, count(*) AS row_count`,
+          `FROM ${table}`,
+          `WHERE ${quoteIdentifier(column)} IS NOT NULL`,
+          `GROUP BY ${quoteIdentifier(column)}`,
+          'ORDER BY row_count DESC',
+          `LIMIT ${maxRows}`
+        ].join(' ')
+      })),
+      ...metrics.slice(0, 2).map(column => ({
+        round: 1,
+        title: `Distribution summary for ${column}`,
+        columns: ['nonnull_rows', 'min_value', 'max_value', 'avg_value'],
+        sql: [
+          `SELECT count(${quoteIdentifier(column)}) AS nonnull_rows,`,
+          `min(${quoteIdentifier(column)}) AS min_value,`,
+          `max(${quoteIdentifier(column)}) AS max_value,`,
+          `avg(${quoteIdentifier(column)}) AS avg_value`,
+          `FROM ${table}`
+        ].join(' ')
+      })),
+      ...(rounds >= 2 && dimensions[0] && metrics[0]
+        ? [{
+            round: 2,
+            title: `${metrics[0]} by ${dimensions[0]}`,
+            columns: [dimensions[0], 'row_count', 'avg_value', 'max_value'],
+            sql: [
+              `SELECT ${quoteIdentifier(dimensions[0])}, count(*) AS row_count,`,
+              `avg(${quoteIdentifier(metrics[0])}) AS avg_value,`,
+              `max(${quoteIdentifier(metrics[0])}) AS max_value`,
+              `FROM ${table}`,
+              `WHERE ${quoteIdentifier(dimensions[0])} IS NOT NULL AND ${quoteIdentifier(metrics[0])} IS NOT NULL`,
+              `GROUP BY ${quoteIdentifier(dimensions[0])}`,
+              'ORDER BY row_count DESC',
+              `LIMIT ${maxRows}`
+            ].join(' ')
+          }]
+        : []),
+      ...(rounds >= 2 && timestamp && dimensions[0]
+        ? [{
+            round: 2,
+            title: `${dimensions[0]} recent daily pattern`,
+            columns: ['day', dimensions[0], 'row_count'],
+            sql: [
+              `SELECT CAST(date_trunc('day', ${quoteIdentifier(timestamp)}) AS varchar) AS day,`,
+              `${quoteIdentifier(dimensions[0])}, count(*) AS row_count`,
+              `FROM ${table}`,
+              `WHERE ${quoteIdentifier(timestamp)} IS NOT NULL AND ${quoteIdentifier(dimensions[0])} IS NOT NULL`,
+              `GROUP BY 1, 2`,
+              'ORDER BY day DESC, row_count DESC',
+              `LIMIT ${maxRows}`
+            ].join(' ')
+          }]
+        : [])
+    ].slice(0, remainingProbes);
+
+    for (const probe of planned) {
+      try {
+        const rows = await client.query(probe.sql);
+        probes.push({
+          round: probe.round,
+          title: probe.title,
+          sql: probe.sql,
+          rows: rows.slice(0, maxRows).map(row => rowToObject(probe.columns, row)),
+          notes: []
+        });
+      } catch (error) {
+        probes.push({
+          round: probe.round,
+          title: probe.title,
+          sql: probe.sql,
+          rows: [],
+          notes: [`Probe failed: ${error instanceof Error ? error.message : String(error)}`]
+        });
+      }
+      remainingProbes -= 1;
+      if (remainingProbes <= 0) break;
+    }
+
+    results.push({ source, probes });
+  }
+
+  return results;
+}
+
+export async function runTrinoReadOnlyProbe(settings: SettingsAccess, sql: string, maxRows = 50): Promise<TrinoReadOnlyProbeResult> {
+  const boundedRows = clampNumber(maxRows, 1, 200, 50);
+  const safeSql = buildSafeReadOnlyProbeSql(sql, boundedRows);
+  const client = createTrinoClient(settings);
+  const result = await client.queryDetailed(safeSql);
+  const columns = result.columns.length
+    ? result.columns
+    : Array.from({ length: result.rows[0]?.length || 0 }, (_, index) => `col_${index + 1}`);
+  const rows = result.rows.slice(0, boundedRows).map(row => rowToObject(columns, row));
+  return {
+    sql: safeSql,
+    columns,
+    rows,
+    rowCount: rows.length,
+    truncated: result.rows.length > boundedRows
+  };
+}
+
 function createTrinoClient(settings: SettingsAccess) {
   const prefix = settings.get('STARBURST_HOST') ? 'STARBURST' : 'TRINO';
   const host = settings.get(`${prefix}_HOST`) || settings.get('TRINO_HOST');
@@ -329,6 +613,9 @@ function createTrinoClient(settings: SettingsAccess) {
     connectionLabel: `${prefix === 'STARBURST' ? 'Starburst' : 'Trino'} ${host}`,
     defaultSchema: schema,
     async query(sql: string) {
+      return (await this.queryDetailed(sql)).rows;
+    },
+    async queryDetailed(sql: string) {
       const startedAt = Date.now();
       let pageCount = 1;
       let body = await requestStatement(settings, `${baseUrl}/v1/statement`, timeoutMs, {
@@ -344,6 +631,7 @@ function createTrinoClient(settings: SettingsAccess) {
         body: sql
       });
       const rows = [...(body.data || [])];
+      const columns = (body.columns || []).map(column => String(column.name || '')).filter(Boolean);
       while (body.nextUri) {
         if (Date.now() - startedAt > statementTimeoutMs) {
           throw new Error(`Trino profiler statement exceeded ${statementTimeoutMs}ms: ${summarizeSql(sql)}`);
@@ -357,9 +645,19 @@ function createTrinoClient(settings: SettingsAccess) {
         pageCount += 1;
         rows.push(...(body.data || []));
       }
-      return rows;
+      return { columns, rows };
     }
   };
+}
+
+function buildSafeReadOnlyProbeSql(sql: string, maxRows: number) {
+  const normalized = sql.trim().replace(/;+\s*$/, '');
+  if (!/^(select|with)\b/i.test(normalized)) throw new Error('Auto analyst probes must start with SELECT or WITH.');
+  if (/;/.test(normalized)) throw new Error('Auto analyst probes may contain only one statement.');
+  if (/\b(insert|update|delete|merge|drop|alter|create|replace|truncate|grant|revoke|call|execute|prepare|deallocate|set\s+session|reset\s+session|use)\b/i.test(normalized)) {
+    throw new Error('Auto analyst probes must be read-only and cannot contain DDL, DML, session changes, or procedure calls.');
+  }
+  return `SELECT * FROM (${normalized}) auto_analyst_probe LIMIT ${maxRows}`;
 }
 
 function summarizeSql(sql: string) {
@@ -541,6 +839,56 @@ function groupColumns(columns: TrinoColumn[]) {
   return grouped;
 }
 
+function selectEvidenceColumns(table: TrinoProfile['analyzedTables'][number], limit: number) {
+  const priority = [
+    ...table.timestampColumns,
+    ...table.dimensionColumns,
+    ...table.metricColumns,
+    ...table.columns.map(column => column.name)
+  ];
+  const selected = new Set<string>();
+  for (const name of priority) {
+    if (selected.size >= limit) break;
+    if (name) selected.add(name);
+  }
+  return [...selected]
+    .map(name => table.columns.find(column => column.name === name))
+    .filter((column): column is TrinoColumn => Boolean(column));
+}
+
+function selectTopValueColumns(table: TrinoProfile['analyzedTables'][number], limit: number) {
+  return [...new Set(table.dimensionColumns.filter(column => !/id$/i.test(column)).slice(0, limit))];
+}
+
+function quoteQualifiedTable(catalog: string, schema: string, table: string) {
+  return `${quoteIdentifier(catalog)}.${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+}
+
+function normalizeSampleValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Date) return value.toISOString();
+  return String(value).slice(0, 500);
+}
+
+function selectProbeColumns(preferred: string[], columns: TrinoAutoProbeTarget['columns'], limit: number, numeric: boolean) {
+  const byName = new Set(columns.map(column => column.name));
+  const fallback = columns
+    .filter(column => numeric ? /bigint|integer|double|decimal|real|number|numeric/i.test(column.type) && !/id$/i.test(column.name) : /char|varchar|boolean/i.test(column.type) && !/id$/i.test(column.name))
+    .map(column => column.name);
+  return orderedUnique([...preferred, ...fallback])
+    .filter(column => byName.has(column))
+    .slice(0, limit);
+}
+
+function hasColumn(target: TrinoAutoProbeTarget, name: string) {
+  return target.columns.some(column => column.name === name);
+}
+
+function rowToObject(columns: string[], row: unknown[]) {
+  return Object.fromEntries(columns.map((column, index) => [column, normalizeSampleValue(row[index])])) as Record<string, string | number | boolean | null>;
+}
+
 function rankCatalogs(catalogs: string[], domainKnowledge: string) {
   const preferred = ['hive', 'iceberg', 'delta', 'postgresql', 'mysql', 'oracle', 'sqlserver', 'tpch', 'tpcds'];
   const lowerKnowledge = domainKnowledge.toLowerCase();
@@ -550,12 +898,19 @@ function rankCatalogs(catalogs: string[], domainKnowledge: string) {
 function normalizeFocusTargets(targets: TrinoProfileFocusTarget[]) {
   return targets
     .map(target => ({
-      catalog: target.catalog?.trim().toLowerCase(),
-      schema: target.schema?.trim(),
-      table: target.table?.trim(),
+      catalog: normalizeFocusPart(target.catalog)?.toLowerCase(),
+      schema: normalizeFocusPart(target.schema),
+      table: normalizeFocusPart(target.table),
       tableType: target.tableType?.trim()
     }))
     .filter(target => target.catalog || target.schema || target.table);
+}
+
+function normalizeFocusPart(value?: string) {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '*') return undefined;
+  if (trimmed.toLowerCase() === 'auto') throw new Error('Invalid Trino focus target placeholder "auto". Use "*" for wildcard focus targets.');
+  return trimmed;
 }
 
 function orderedUnique(values: string[]) {

@@ -15,6 +15,7 @@ import { explainError, sanitizeErrorMessage } from './error-explainer.js';
 import { AnalyticsProfileService } from './analytics-profile-service.js';
 import { testExternalConnection, type ConnectionTestTarget } from './connection-tests.js';
 import { applyDemoConnectionChecks, buildDemoPlan } from './demo.js';
+import { runAutoReport } from './auto-report.js';
 import { searchElasticFocusTargets } from './elastic-profiler.js';
 import { listTrinoFocusCatalogs, listTrinoFocusSchemas, listTrinoFocusTables } from './trino-profiler.js';
 
@@ -90,6 +91,34 @@ const settingsTestBodySchema = z.object({
 
 const demoBodySchema = z.object({
   appIds: z.array(z.string()).optional()
+});
+
+const autoReportBodySchema = z.object({
+  appIds: z.array(z.string()).optional(),
+  tokenBudget: z.number().int().min(1500).max(400_000).optional(),
+  scopeMode: z.enum(['focused', 'contextual', 'open']).optional(),
+  includeWhySection: z.boolean().optional(),
+  focusTargets: z
+    .array(
+      z.union([
+        z.object({
+          source: z.literal('trino'),
+          catalog: z.string().optional(),
+          schema: z.string().optional(),
+          table: z.string().optional(),
+          tableType: z.string().optional(),
+          label: z.string().optional()
+        }),
+        z.object({
+          source: z.literal('elastic'),
+          indexPattern: z.string(),
+          kind: z.string().optional(),
+          label: z.string().optional()
+        })
+      ])
+    )
+    .max(24)
+    .optional()
 });
 
 const focusPageSchema = z.object({
@@ -261,6 +290,35 @@ async function main() {
       const connectionChecks = plan.ok ? await runDemoConnectionChecks(session.settings, plan.requiredConnections) : [];
       res.json(applyDemoConnectionChecks(plan, connectionChecks));
     } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/api/auto-report', async (req, res, next) => {
+    try {
+      const session = sessions.get(req, res);
+      const body = autoReportBodySchema.parse(req.body || {});
+      logger.info('auto report started', {
+        sessionId: session.id.slice(0, 8),
+        appIds: body.appIds || [],
+        tokenBudget: body.tokenBudget,
+        scopeMode: body.scopeMode,
+        focusTargets: body.focusTargets?.length || 0
+      });
+      const result = await runAutoReport(session.registry, session.settings, analyticsProfiles, body, (message, detail) => {
+        session.progress.publish(message, detail);
+      });
+      logger.info('auto report completed', {
+        sessionId: session.id.slice(0, 8),
+        tokenBudget: result.report.tokenBudget,
+        includedObjects: result.report.includedObjects,
+        skippedObjects: result.report.skippedObjects,
+        judgePassed: result.report.judge.pass
+      });
+      res.json(result);
+    } catch (error) {
+      const session = sessions.get(req, res);
+      session.progress.publish('Auto Report failed', { error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) }, 'error');
       next(error);
     }
   });

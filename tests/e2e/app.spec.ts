@@ -1103,6 +1103,7 @@ test('opens settings and disables env-backed fields', async ({ page }) => {
   await expect(page.getByLabel('Trino / Starburst profiler status').getByText('Stale')).toBeVisible();
   await expect(page.getByLabel('Analytics profiler schedule ms')).toHaveValue('86400000');
   await expect(page.getByLabel('Analytics profiler targets')).toHaveValue('all');
+  await expect(page.getByLabel('Auto Report token budget')).toHaveValue('8000');
   await page.getByLabel('Analytics profiler targets').fill('trino');
   await page.getByRole('button', { name: 'Reset Analytics Profiler defaults' }).click();
   await expect(page.getByLabel('Analytics profiler targets')).toHaveValue('all');
@@ -1305,7 +1306,8 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
   await page.goto(appPath());
   await expect(page.getByLabel('Elastic Dashbuilder')).toBeChecked();
   await expect(page.getByLabel('Trino Visualization')).toBeChecked();
-  await page.getByRole('button', { name: 'Run live demo' }).click();
+  await page.getByRole('button', { name: 'Analyze' }).click();
+  await page.getByRole('menuitem', { name: 'Demo Analysis' }).click();
 
   await expect(page.getByText('Run the one-click Rubberband live demo.')).toHaveCount(0);
   await expect(page.getByText('Canned Questions')).toHaveCount(0);
@@ -1320,6 +1322,86 @@ test('runs one-click live demo from selected apps', async ({ page }) => {
   expect(chatBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
   expect(chatBody?.deepAnalysis).toBe(false);
   expect(chatBody?.messages?.at(-1)?.content).toContain('Use actual available data');
+});
+
+test('runs Auto Report from the Analyze menu', async ({ page }) => {
+  let reportBody: { appIds?: string[]; tokenBudget?: number; scopeMode?: string; includeWhySection?: boolean } | undefined;
+
+  await page.route('**/api/apps', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        apps: [
+          { id: 'dashbuilder', name: 'Elastic Dashbuilder', status: 'connected' },
+          { id: 'mcp-app-trino', name: 'Trino Visualization', status: 'connected' }
+        ]
+      })
+    });
+  });
+  await page.route('**/api/tools', async route => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tools: [] }) });
+  });
+  await page.route('**/api/auto-report', async route => {
+    reportBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: '# Analyst Report\n\n## Executive Summary\n\nFocused report ready.\n\n## Visuals and Dashboards\n\nTwo previews are included with this report.\n\n## Analysis Basis\n\nSelected focus objects were reviewed.',
+        toolCalls: [
+          {
+            id: 'report-chart-1',
+            appId: 'dashbuilder',
+            toolName: 'create_chart',
+            toolInput: {},
+            toolResult: { content: [] },
+            html: '<!doctype html><html><body><main><h1>Focused trend chart</h1></main></body></html>',
+            resourceUri: 'ui://auto-report/focused-trend.html',
+            title: 'Focused trend chart'
+          },
+          {
+            id: 'report-dashboard-1',
+            appId: 'mcp-app-trino',
+            toolName: 'visualize_query',
+            toolInput: {},
+            toolResult: { content: [] },
+            html: '<!doctype html><html><body><main><h1>Warehouse dashboard</h1></main></body></html>',
+            resourceUri: 'ui://auto-report/warehouse-dashboard.html',
+            title: 'Warehouse dashboard'
+          }
+        ],
+        followUps: ['Run a focused chart for logs-prod'],
+        usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70, model: 'fixture-model', source: 'llm' },
+        report: {
+          runId: 'auto-report-test',
+          scopeMode: 'open',
+          tokenBudget: 8000,
+          includedObjects: 2,
+          skippedObjects: 1,
+          supportingArtifacts: 2,
+          visualizations: 2,
+          judge: { pass: true, issues: [] }
+        }
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByRole('button', { name: 'Analyze' }).click();
+  await page.getByRole('menuitem', { name: 'Auto Report' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Analyst Report' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Visuals and Dashboards' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Analysis Basis' })).toBeVisible();
+  await expect(page.getByText('Focused trend chart')).toBeVisible();
+  await expect(page.getByText('Warehouse dashboard')).toBeVisible();
+  await expect(page.getByLabel('Token usage').filter({ hasText: '70 tokens' })).toBeVisible();
+  await expect(page.getByLabel('Suggested follow-up questions')).toBeVisible();
+  expect(reportBody?.appIds).toEqual(['dashbuilder', 'mcp-app-trino']);
+  expect(reportBody?.tokenBudget).toBe(8000);
+  expect(reportBody?.scopeMode).toBe('open');
+  expect(reportBody?.includeWhySection).toBe(true);
 });
 
 test('falls back to a static feature tour when live demo is unavailable', async ({ page }) => {
@@ -1356,7 +1438,8 @@ test('falls back to a static feature tour when live demo is unavailable', async 
   });
 
   await page.goto(appPath());
-  await page.getByRole('button', { name: 'Run live demo' }).click();
+  await page.getByRole('button', { name: 'Analyze' }).click();
+  await page.getByRole('menuitem', { name: 'Demo Analysis' }).click();
 
   await expect(page.getByRole('heading', { name: 'Rubberband Demo' })).toBeVisible();
   await expect(page.getByText(/static feature tour/i)).toBeVisible();
@@ -1415,7 +1498,8 @@ test('recovers gracefully when a live demo step fails', async ({ page }) => {
   });
 
   await page.goto(appPath());
-  await page.getByRole('button', { name: 'Run live demo' }).click();
+  await page.getByRole('button', { name: 'Analyze' }).click();
+  await page.getByRole('menuitem', { name: 'Demo Analysis' }).click();
 
   await expect(page.getByRole('heading', { name: 'Step skipped gracefully: Deep Analysis wrap-up' })).toBeVisible();
   await expect(page.getByText('That step took the scenic route and did not make it back in time.')).toBeVisible();

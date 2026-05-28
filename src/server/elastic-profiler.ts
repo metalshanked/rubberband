@@ -8,6 +8,26 @@ export type ElasticProfileOptions = {
   includeSystem?: boolean;
 };
 
+export type ElasticFocusedEvidence = {
+  profile: ElasticProfile;
+  samples: Array<{
+    target: string;
+    fields: Array<{ name: string; type: string }>;
+    sampleDocuments: Array<Record<string, unknown>>;
+    topValues: Array<{ field: string; values: Array<{ value: string; count: number }> }>;
+    notes: string[];
+  }>;
+};
+
+export type ElasticReadOnlySearchResult = {
+  indexPattern: string;
+  body: Record<string, unknown>;
+  hits: Array<Record<string, unknown>>;
+  aggregations?: unknown;
+  rowCount: number;
+  truncated: boolean;
+};
+
 export type ElasticFocusTarget = {
   name: string;
   kind: 'index' | 'data_stream' | 'cross_cluster';
@@ -47,6 +67,12 @@ type ResolveClusterResponse = {
     version?: { number?: string };
     error?: unknown;
   }>;
+};
+
+type ElasticFieldCapability = {
+  type?: string;
+  aggregatable?: boolean;
+  searchable?: boolean;
 };
 
 type ProfiledIndex = {
@@ -290,6 +316,145 @@ export async function searchElasticFocusTargets(settings: SettingsAccess, query:
   };
 }
 
+export async function buildFocusedElasticEvidence(
+  settings: SettingsAccess,
+  focusTargets: ElasticFocusTarget[],
+  options: {
+    maxTargets?: number;
+    maxSampleDocs?: number;
+    maxSampleFields?: number;
+    maxTopValueFields?: number;
+    maxTopValues?: number;
+  } = {}
+): Promise<ElasticFocusedEvidence> {
+  const maxTargets = clampNumber(options.maxTargets, 1, 24, Math.max(1, focusTargets.length || 1));
+  const maxSampleDocs = clampNumber(options.maxSampleDocs, 1, 50, 20);
+  const maxSampleFields = clampNumber(options.maxSampleFields, 4, 40, 18);
+  const maxTopValueFields = clampNumber(options.maxTopValueFields, 0, 8, 4);
+  const maxTopValues = clampNumber(options.maxTopValues, 1, 25, 8);
+  const client = createElasticClient(settings);
+  const targets = dedupeFocusTargets(focusTargets.filter(target => target.name.trim()).slice(0, maxTargets));
+  const samples: ElasticFocusedEvidence['samples'] = [];
+  const analyzedIndices: ProfiledIndex[] = [];
+
+  for (const target of targets) {
+    const notes: string[] = [];
+    const caps = await getEvidenceFieldCaps(client, target.name).catch(error => {
+      notes.push(`Field metadata could not be inspected: ${errorMessage(error)}`);
+      return { fields: {} as Record<string, Record<string, ElasticFieldCapability>> };
+    });
+    const fields = fieldCapsToTypedFields(caps.fields || {});
+    const profile = profileIndex(
+      {
+        name: target.name,
+        kind: target.kind,
+        docs: target.docs || 0,
+        health: target.health,
+        system: isSystemIndex(target.name),
+        backingIndices: target.backingIndices,
+        score: scoreIndex(target.name, target.docs || 0, settings.get('DOMAIN_KNOWLEDGE'))
+      },
+      caps.fields || {},
+      maxSampleFields
+    );
+    analyzedIndices.push(profile);
+
+    const sampleFields = selectEvidenceFields(fields, maxSampleFields);
+    const sampleDocuments = sampleFields.length
+      ? await readSampleDocuments(client, target.name, sampleFields, maxSampleDocs, profile.timestampFields[0]).catch(error => {
+          notes.push(`Sample documents could not be inspected: ${errorMessage(error)}`);
+          return [] as Array<Record<string, unknown>>;
+        })
+      : [];
+    const topValueFields = fields
+      .filter(field => isTopValueField(field) && sampleFields.includes(field.name))
+      .slice(0, maxTopValueFields)
+      .map(field => field.name);
+    const topValues = await readTopValues(client, target.name, topValueFields, maxTopValues, notes);
+
+    samples.push({
+      target: target.name,
+      fields: fields.slice(0, Math.max(maxSampleFields, maxTopValueFields)),
+      sampleDocuments,
+      topValues,
+      notes
+    });
+  }
+
+  const generatedAt = new Date().toISOString();
+  const suggestions = dedupeSuggestions(analyzedIndices.flatMap(index => index.suggestions)).slice(0, 18);
+  const domainKnowledge = settings.get('DOMAIN_KNOWLEDGE');
+  return {
+    profile: {
+      mode: 'deep-analysis',
+      generatedAt,
+      boundedBy: {
+        maxIndices: maxTargets,
+        maxFieldCaps: maxTargets,
+        includeSystem: true,
+        includeDataStreams: true,
+        includedPatterns: targets.map(target => target.name),
+        excludedPatterns: [],
+        crossClusterSearchByDefault: readElasticCcsSettings(settings).searchByDefault,
+        crossClusterTargets: targets.filter(target => target.kind === 'cross_cluster').map(target => target.name)
+      },
+      domainKnowledge,
+      totalDiscoveredIndices: targets.filter(target => target.kind === 'index').length,
+      totalDiscoveredDataStreams: targets.filter(target => target.kind === 'data_stream').length,
+      totalDiscoveredCrossClusterTargets: targets.filter(target => target.kind === 'cross_cluster').length,
+      analyzedIndices,
+      skipped: {
+        systemIndices: 0,
+        emptyIndices: 0,
+        dataStreams: 0,
+        uninspectedIndices: 0,
+        crossClusterTargets: 0
+      },
+      suggestions,
+      caveats: [
+        'Elastic evidence was collected from the selected focus targets only.',
+        ...samples.flatMap(sample => sample.notes.map(note => `${sample.target}: ${note}`))
+      ]
+    },
+    samples
+  };
+}
+
+export async function runElasticReadOnlySearch(
+  settings: SettingsAccess,
+  indexPattern: string,
+  body: Record<string, unknown>,
+  maxRows = 50
+): Promise<ElasticReadOnlySearchResult> {
+  const target = indexPattern.trim();
+  if (!target) throw new Error('Elastic read-only probe requires an index pattern.');
+  const boundedRows = clampNumber(maxRows, 1, 200, 50);
+  const safeBody = buildSafeElasticSearchBody(body, boundedRows);
+  const client = createElasticClient(settings);
+  type SearchResponse = {
+    hits?: { hits?: Array<{ _source?: Record<string, unknown>; fields?: Record<string, unknown>; _id?: string; _index?: string }> };
+    aggregations?: unknown;
+  };
+  const response = await client.post<SearchResponse>(
+    `/${encodeURIComponent(target)}/_search?ignore_unavailable=true`,
+    safeBody
+  );
+  const hits = (response.hits?.hits || []).slice(0, boundedRows).map(hit => ({
+    ...(hit._index ? { _index: hit._index } : {}),
+    ...(hit._id ? { _id: hit._id } : {}),
+    ...(hit._source || {}),
+    ...(hit.fields || {})
+  }));
+  return {
+    indexPattern: target,
+    body: safeBody,
+    hits,
+    ...(response.aggregations !== undefined ? { aggregations: response.aggregations } : {}),
+    rowCount: hits.length,
+    truncated: (response.hits?.hits || []).length > boundedRows
+  };
+}
+
 export function renderElasticProfile(profile: ElasticProfile) {
   const lines = [
     '# Elastic Deep Analysis',
@@ -336,23 +501,42 @@ function createElasticClient(settings: SettingsAccess) {
 
   return {
     async get<T>(path: string, timeoutMs = requestTimeoutMs): Promise<T> {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchWithMasterTls(settings, `${baseUrl}${path}`, {
-          headers: { authorization: authHeader },
-          signal: controller.signal
-        });
-        if (!response.ok) {
-          const body = await response.text();
-          throw new Error(`Elasticsearch request failed (${response.status}): ${body}`);
-        }
-        return response.json() as Promise<T>;
-      } finally {
-        clearTimeout(timeout);
-      }
+      return requestElastic<T>(settings, `${baseUrl}${path}`, authHeader, 'GET', undefined, timeoutMs);
+    },
+    async post<T>(path: string, body: unknown, timeoutMs = requestTimeoutMs): Promise<T> {
+      return requestElastic<T>(settings, `${baseUrl}${path}`, authHeader, 'POST', body, timeoutMs);
     }
   };
+}
+
+async function requestElastic<T>(
+  settings: SettingsAccess,
+  url: string,
+  authHeader: string,
+  method: 'GET' | 'POST',
+  body: unknown,
+  timeoutMs: number
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchWithMasterTls(settings, url, {
+      method,
+      headers: {
+        authorization: authHeader,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' })
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const responseBody = await response.text();
+      throw new Error(`Elasticsearch request failed (${response.status}): ${responseBody}`);
+    }
+    return response.json() as Promise<T>;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function buildElasticAuthHeader(settings: Pick<SettingsAccess, 'get'>) {
@@ -513,6 +697,12 @@ async function getFieldCaps(client: ReturnType<typeof createElasticClient>, inde
   );
 }
 
+async function getEvidenceFieldCaps(client: ReturnType<typeof createElasticClient>, index: string) {
+  return client.get<{ fields?: Record<string, Record<string, ElasticFieldCapability>> }>(
+    `/${encodeURIComponent(index)}/_field_caps?fields=*&ignore_unavailable=true&filter_path=fields.*.*.type,fields.*.*.aggregatable,fields.*.*.searchable`
+  );
+}
+
 function profileIndex(
   item: Pick<ProfiledIndex, 'name' | 'kind' | 'docs' | 'storeSize' | 'health' | 'system' | 'backingIndices' | 'score'>,
   fields: Record<string, Record<string, { type?: string }>>,
@@ -539,6 +729,171 @@ function profileIndex(
     fieldCount: typedFields.length,
     suggestions: suggestFromFields(item.name, domains, timestampFields, keywordFields, numericFields)
   };
+}
+
+function fieldCapsToTypedFields(fields: Record<string, Record<string, ElasticFieldCapability>>) {
+  return Object.entries(fields).map(([name, caps]) => {
+    const first = Object.values(caps)[0] || {};
+    return {
+      name,
+      type: first.type || 'unknown',
+      aggregatable: Object.values(caps).some(capability => capability.aggregatable !== false),
+      searchable: Object.values(caps).some(capability => capability.searchable !== false)
+    };
+  });
+}
+
+function selectEvidenceFields(fields: ReturnType<typeof fieldCapsToTypedFields>, maxFields: number) {
+  const typed = fields.map(field => ({ name: field.name, type: field.type }));
+  const notable = selectNotableFields(typed, maxFields);
+  const byName = new Map(fields.map(field => [field.name, field]));
+  const timestamps = fields.filter(field => field.type === 'date' || /(^|[._-])(@timestamp|timestamp|time|created|event_time)([._-]|$)/i.test(field.name));
+  const dimensions = fields.filter(field => isTopValueField(field));
+  const numerics = fields.filter(field => ['long', 'integer', 'short', 'byte', 'double', 'float', 'half_float', 'scaled_float', 'unsigned_long'].includes(field.type));
+  return dedupeStrings([
+    ...timestamps.slice(0, 3).map(field => field.name),
+    ...dimensions.slice(0, 6).map(field => field.name),
+    ...numerics.slice(0, 4).map(field => field.name),
+    ...notable
+  ])
+    .filter(name => byName.has(name))
+    .slice(0, maxFields);
+}
+
+function isTopValueField(field: { name: string; type: string; aggregatable?: boolean }) {
+  return field.aggregatable !== false && ['keyword', 'constant_keyword', 'ip', 'boolean'].includes(field.type);
+}
+
+async function readSampleDocuments(
+  client: ReturnType<typeof createElasticClient>,
+  target: string,
+  fields: string[],
+  maxSampleDocs: number,
+  timestampField?: string
+) {
+  type SearchResponse = {
+    hits?: {
+      hits?: Array<{ _source?: Record<string, unknown>; fields?: Record<string, unknown[]> }>;
+    };
+  };
+  const response = await client.post<SearchResponse>(
+    `/${encodeURIComponent(target)}/_search?ignore_unavailable=true`,
+    {
+      size: maxSampleDocs,
+      _source: fields,
+      track_total_hits: false,
+      query: { match_all: {} },
+      ...(timestampField
+        ? { sort: [{ [timestampField]: { order: 'desc', unmapped_type: 'date' } }] }
+        : { sort: ['_doc'] })
+    }
+  );
+  return (response.hits?.hits || []).map(hit => normalizeElasticDocument(hit._source || {}, fields));
+}
+
+async function readTopValues(
+  client: ReturnType<typeof createElasticClient>,
+  target: string,
+  fields: string[],
+  maxTopValues: number,
+  notes: string[]
+) {
+  const topValues: Array<{ field: string; values: Array<{ value: string; count: number }> }> = [];
+  for (const [index, field] of fields.entries()) {
+    type AggregationResponse = {
+      aggregations?: Record<string, { buckets?: Array<{ key?: unknown; key_as_string?: string; doc_count?: number }> }>;
+    };
+    const aggName = `top_${index}`;
+    const response = await client.post<AggregationResponse>(
+      `/${encodeURIComponent(target)}/_search?ignore_unavailable=true`,
+      {
+        size: 0,
+        track_total_hits: false,
+        aggs: {
+          [aggName]: {
+            terms: {
+              field,
+              size: maxTopValues,
+              missing: '__missing__'
+            }
+          }
+        }
+      }
+    ).catch(error => {
+      notes.push(`Top values for ${field} could not be inspected: ${errorMessage(error)}`);
+      return undefined;
+    });
+    const buckets = response?.aggregations?.[aggName]?.buckets || [];
+    topValues.push({
+      field,
+      values: buckets.map(bucket => ({
+        value: String(normalizeElasticValue(bucket.key_as_string ?? bucket.key) ?? ''),
+        count: Number(bucket.doc_count || 0)
+      }))
+    });
+  }
+  return topValues;
+}
+
+function normalizeElasticDocument(source: Record<string, unknown>, fields: string[]) {
+  const normalized: Record<string, unknown> = {};
+  for (const field of fields) {
+    normalized[field] = normalizeElasticValue(readDottedValue(source, field));
+  }
+  return normalized;
+}
+
+function readDottedValue(source: Record<string, unknown>, field: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(source, field)) return source[field];
+  const parts = field.split('.');
+  let current: unknown = source;
+  for (const part of parts) {
+    if (!current || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, part)) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function normalizeElasticValue(value: unknown): string | number | boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Date) return value.toISOString();
+  try {
+    return JSON.stringify(value).slice(0, 240);
+  } catch {
+    return String(value).slice(0, 240);
+  }
+}
+
+function buildSafeElasticSearchBody(body: Record<string, unknown>, maxRows: number) {
+  assertSafeElasticSearchValue(body);
+  const safeBody = { ...body };
+  const requestedSize = typeof safeBody.size === 'number' ? safeBody.size : typeof safeBody.size === 'string' ? Number(safeBody.size) : maxRows;
+  safeBody.size = Math.min(maxRows, Math.max(0, Number.isFinite(requestedSize) ? Math.trunc(requestedSize) : maxRows));
+  safeBody.track_total_hits = false;
+  return safeBody;
+}
+
+function assertSafeElasticSearchValue(value: unknown, path = 'body') {
+  if (value === null || value === undefined) return;
+  if (typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertSafeElasticSearchValue(item, `${path}[${index}]`));
+    return;
+  }
+  const forbiddenKeys = new Set([
+    'script',
+    'script_fields',
+    'runtime_mappings',
+    'profile',
+    'explain',
+    'pit'
+  ]);
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    const lowerKey = key.toLowerCase();
+    if (forbiddenKeys.has(lowerKey)) throw new Error(`Elastic read-only probe rejected unsafe or expensive key: ${path}.${key}`);
+    assertSafeElasticSearchValue(nested, `${path}.${key}`);
+  }
 }
 
 function suggestFromFields(index: string, domains: string[], timestamps: string[], keywords: string[], numerics: string[]) {
