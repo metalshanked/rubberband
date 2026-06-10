@@ -7,7 +7,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-dashbuilder.git",
-        "ref": "21ce3b2a57327614aebc9f2ca55ffe371d0df0ed"
+        "ref": "ea9deeacfa07483f8f04e9bf6204c5e44fdba9b0"
       },
       "install": [
         ["npm", "install"],
@@ -43,7 +43,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-security.git",
-        "ref": "53a38c69a1ee3b9454a54ce816c3708453560b20"
+        "ref": "18f450cd3a71bff0d76fa9a76fcefbef75673519"
       },
       "install": [
         ["npm", "install"],
@@ -81,7 +81,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-observability.git",
-        "ref": "a8799b7149d483f82c8792fbe6c457ce85a2702e"
+        "ref": "635661a19245962fbab27095b0e90ec8fbcc2048"
       },
       "install": [
         ["npm", "install"],
@@ -90,33 +90,33 @@
       "skillPacks": [
         {
           "name": "apm-health-summary.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/apm-health-summary.zip",
-          "sha256": "8ec8737be8534ea573badfb05816d98518067b8eaa31ad2740064785d7554e13"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/apm-health-summary.zip",
+          "sha256": "5169d2e11d96ce9a40bef8a2540143628ca6a47b74e99e628c67fc910676e9bb"
         },
         {
           "name": "apm-service-dependencies.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/apm-service-dependencies.zip",
-          "sha256": "02c95dcca9465751fabb3e900323f8a30a6637b57d744e48499f34f41a105720"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/apm-service-dependencies.zip",
+          "sha256": "e3cc02c486fbaf6f30eb1c125df8af26cbef6def43e7dc4d920ef34c21ba8b7f"
         },
         {
           "name": "k8s-blast-radius.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/k8s-blast-radius.zip",
-          "sha256": "ed615ee9039555456aafba7d8289625db55b7a3af88739e86942329f3fb9e0af"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/k8s-blast-radius.zip",
+          "sha256": "1416ed66fcabc45c6357284d22e733dec2756ede0279a5ec083e9fc5ab1cc3fd"
         },
         {
           "name": "manage-alerts.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/manage-alerts.zip",
-          "sha256": "4413ec37bd6259155d02c78c58d98ab4dd0d9b341d19bfaf180362c2c2bceba9"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/manage-alerts.zip",
+          "sha256": "a85c9f3ce5be93c989ec2b8b9076a83acce1b7ba97e6edd1e9e9e25138340e37"
         },
         {
           "name": "ml-anomalies.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/ml-anomalies.zip",
-          "sha256": "7849e460a16b651e7da86e60e424ac0a98b35df4bde47a261ce7fbd8484d570a"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/ml-anomalies.zip",
+          "sha256": "086c2e7d17b96c220e08db724666f87ab4c1056571241132c9e5a2ccbcc7e64d"
         },
         {
           "name": "observe.zip",
-          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.1.1/observe.zip",
-          "sha256": "77c5774e0642e2bd6f97f0f3b6cba937aaf3f910b4985c0af8bfc5e539e0a979"
+          "url": "https://github.com/elastic/example-mcp-app-observability/releases/download/v1.3.1/observe.zip",
+          "sha256": "1c625bddd363649ece5469e256705b0dbf373d39056f7d4a243e40e239a9dbc4"
         }
       ],
       "transport": {
