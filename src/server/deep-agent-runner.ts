@@ -28,6 +28,15 @@ export type AutoAnalystDeepAgentResult = {
   toolCalls: RenderableToolCall[];
   skipped: string[];
 };
+
+const MCP_APP_ROUTING_GUIDANCE = [
+  'Selected MCP app routing:',
+  '- Use source apps such as Trino, Starburst, Elasticsearch, and domain apps for live data, metadata, and source-specific workflows.',
+  '- Use renderer apps such as Data Analytics only after source-backed evidence is collected and bounded.',
+  '- For Trino-heavy analysis, Trino / Starburst remains the execution source of truth; Data Analytics can package reviewed rows into polished charts, tables, reports, or dashboards.',
+  '- If Data Analytics rendering fails, fall back to the source app native visualization when available, otherwise continue from reviewed rows with provenance and caveats.'
+].join('\n');
+
 export async function runRubberbandDeepAgent(
   settings: SettingsAccess,
   request: string,
@@ -373,6 +382,7 @@ export async function runAutoAnalystDeepAgent(
     systemPrompt: [
       'You are an external-facing senior auto analyst. Explore selected data objects creatively, like a human analyst forming hypotheses and testing them.',
       'Use run_trino_probe_readonly for Trino/Starburst objects and run_elastic_search_readonly for Elastic objects. Use web_search when current public context or source citations are needed. Use selected MCP tools when they can provide semantic context, documentation, code context, evidence, or visual/dashboard artifacts.',
+      MCP_APP_ROUTING_GUIDANCE,
       'Prefer multiple small, thoughtful probes over one broad query. Use at least one probe for each high-priority focus source when possible.',
       'Do not use internal product wording. Do not mention agent internals, prompts, model behavior, or tool plumbing in the final narrative.',
       'Every insight must be tied to a probe result, selected MCP result, schema/sample evidence, or clearly labeled metadata inference.',
@@ -541,7 +551,7 @@ async function buildSelectedMcpDeepTools(
               ok: false,
               tool: `${appId}:${toolName}`,
               error: error instanceof Error ? error.message : String(error),
-              guidance: 'This selected tool failed. Try another selected read-only tool if useful, otherwise continue from available evidence.'
+              guidance: buildSelectedMcpFailureGuidance(appId, appName, toolName)
             });
           }
         },
@@ -550,6 +560,7 @@ async function buildSelectedMcpDeepTools(
           description: [
             String(rawTool.description || `${toolName} from ${appName}`),
             'This is a user-selected MCP tool available to the Auto Analyst. Use it only for read-only supporting evidence, semantic context, docs/code lookup, or report visuals.',
+            buildSelectedMcpRoutingHint(rawTool),
             resourceUri ? 'This tool can produce an interactive preview that can be included with the final report.' : '',
             `Input JSON schema: ${truncate(JSON.stringify(rawTool.inputSchema || {}), 1800)}`
           ].filter(Boolean).join('\n'),
@@ -560,11 +571,39 @@ async function buildSelectedMcpDeepTools(
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
 }
 
+function buildSelectedMcpRoutingHint(rawTool: Record<string, unknown>) {
+  const appId = String(rawTool.appId || '').toLowerCase();
+  const appName = String(rawTool.appName || '').toLowerCase();
+  const haystack = `${appId} ${appName}`;
+  if (haystack.includes('data-analytics') || appName.includes('data analytics')) {
+    return 'Data Analytics is a renderer/workflow layer. Use it only after source-backed rows and provenance have been collected from selected source tools.';
+  }
+  if (haystack.includes('trino') || haystack.includes('starburst')) {
+    return 'Trino / Starburst is the source and execution layer for warehouse data. Use it for SQL execution and quick native visuals.';
+  }
+  if (haystack.includes('confluence') || haystack.includes('semant') || haystack.includes('docs')) {
+    return 'This is a knowledge/context server. Use it for definitions, source context, semantic guidance, or documentation, not as a live data execution engine.';
+  }
+  return '';
+}
+
+function buildSelectedMcpFailureGuidance(appId: string, appName: string, toolName: string) {
+  const haystack = `${appId} ${appName}`.toLowerCase();
+  if ((haystack.includes('data-analytics') || haystack.includes('data analytics')) && /^(validate_artifact|render_artifact|render_chart|render_table)$/i.test(toolName)) {
+    return 'Data Analytics rendering failed. Do not retry the same renderer payload; fall back to the source app native visual when available, especially Trino / Starburst for Trino results, or continue from reviewed source rows with SQL/provenance and caveats.';
+  }
+  return 'This selected tool failed. Try another selected read-only tool if useful, otherwise continue from available evidence.';
+}
+
 function shouldExposeAutoMcpTool(rawTool: Record<string, unknown>) {
   const toolName = String(rawTool.name || '').trim().toLowerCase();
   if (!toolName || ['app_only', 'app-only', 'app.only'].includes(toolName)) return false;
   const meta = (rawTool._meta || {}) as Record<string, unknown>;
-  const visibility = Array.isArray(meta.visibility) ? meta.visibility : typeof meta.visibility === 'string' ? [meta.visibility] : [];
+  const uiMeta = isRecord(meta.ui) ? meta.ui : {};
+  const visibility = [
+    ...(Array.isArray(meta.visibility) ? meta.visibility : typeof meta.visibility === 'string' ? [meta.visibility] : []),
+    ...(Array.isArray(uiMeta.visibility) ? uiMeta.visibility : typeof uiMeta.visibility === 'string' ? [uiMeta.visibility] : [])
+  ];
   if (visibility.map(item => String(item).toLowerCase()).includes('app')) return false;
   const haystack = `${String(rawTool.appId || '')} ${String(rawTool.appName || '')} ${toolName} ${String(rawTool.description || '')}`.toLowerCase();
   return !/\b(delete|remove|update|create|write|insert|drop|alter|grant|revoke|assign|acknowledge|close|reindex|import)\b/.test(haystack) || /\b(chart|dashboard|visuali[sz]e|preview|search|query|read|get|list|find|summarize|lookup|semantic|docs|github|confluence)\b/.test(haystack);

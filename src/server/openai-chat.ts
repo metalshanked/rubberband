@@ -115,6 +115,17 @@ const MAX_SKILL_CHARS = Number(process.env.MAX_SKILL_CHARS || 2600);
 const MAX_CONTEXT_MESSAGES = Number(process.env.MAX_CONTEXT_MESSAGES || 40);
 const MAX_CONTEXT_MESSAGE_CHARS = Number(process.env.MAX_CONTEXT_MESSAGE_CHARS || 3000);
 
+const MCP_APP_ROUTING_GUIDANCE = [
+  'MCP app routing:',
+  '- Treat source apps such as Trino, Starburst, Elasticsearch, and domain apps as the source of truth for live data, metadata, and domain-specific workflows.',
+  '- Treat renderer apps such as Data Analytics as presentation and artifact engines. Use them after source-backed data has been obtained, reviewed, bounded, and paired with provenance such as runnable SQL or source metadata.',
+  '- For Trino-heavy requests, use Trino / Starburst tools for SQL execution and simple native visuals. Use Data Analytics for polished analytical charts, tables, dashboards, reports, artifact validation, and semantic workflow guidance.',
+  '- For domain workflows such as Elastic Security, Observability, Kibana dashboards, or alert/case work, prefer the native domain UI app instead of recreating the same view through a generic renderer.',
+  '- Knowledge or headless MCP servers such as docs, Confluence, semantic catalogs, or code/context servers provide evidence and definitions; they do not replace source query execution or UI rendering.',
+  '- Avoid duplicate previews. If multiple UI apps can render the same result, choose one final preview: domain-native for domain operations, Trino-native for quick SQL visuals, and Data Analytics for polished reports or presentation-grade artifacts.',
+  '- If Data Analytics rendering or validation fails, do not repeatedly retry the same renderer call. Fall back to the source app native visualization when available, especially Trino / Starburst for Trino results; otherwise answer from the reviewed source rows with SQL/provenance and caveats.'
+].join('\n');
+
 export async function runChat(
   registry: McpRegistry,
   settings: SettingsAccess,
@@ -282,8 +293,7 @@ export async function runChat(
             ok: false,
             tool: `${entry.appId}:${entry.toolName}`,
             error: sanitizedError,
-            guidance:
-              'This MCP tool failed. Do not repeat the same broad call. If useful, try one narrower read-only tool call with explicit bounds such as one visualization, top-N, a concrete index/data view, or a time range; otherwise explain the limitation from available context.'
+            guidance: buildToolFailureGuidance(entry)
           })
         });
         continue;
@@ -424,7 +434,7 @@ async function runDeepAgentToolChat(
             ok: false,
             tool: `${entry.appId}:${entry.toolName}`,
             error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
-            guidance: 'This MCP tool failed. Try another selected read-only tool if useful, otherwise explain the limitation and answer from available context.'
+            guidance: buildToolFailureGuidance(entry)
           });
         }
         onProgress(`Deep Agent received result from ${entry.displayName}`, {
@@ -487,6 +497,7 @@ async function runDeepAgentToolChat(
     'You are Rubberband Deep Analysis, an agentic analytics assistant inside a custom MCP Apps host.',
     'You can use the selected MCP tools to answer normal chat requests, including dashboards, charts, SQL analytics, Elastic, Kibana, Trino, Starburst, security, observability, and interactive previews.',
     'For chart, dashboard, visualization, or preview requests, call the relevant MCP tool and produce the interactive result. Do not only describe a chart when a selected MCP visualization tool can create it.',
+    MCP_APP_ROUTING_GUIDANCE,
     'For broad investigation requests, reason step by step and use tools as needed, but keep the final answer concise.',
     'Only perform read-only analysis. Do not ask tools to import, save, create, update, delete, reindex, acknowledge, close, assign, run DDL/DML, or otherwise mutate external systems.',
     analyticsProfiles?.getPromptContext() ? `Background analytics profile context:\n${analyticsProfiles.getPromptContext()}` : '',
@@ -646,8 +657,10 @@ async function runTrinoCatalogMap(
 }
 
 export function buildSystemPrompt(registry: Pick<McpRegistry, 'getSkillGuidance'>, appIds?: string[], domainKnowledge = '', vizContract = '', analyticsProfileContext = '', elasticCcsGuidance = '', mcpSafetyGuidance = '', focusContext = '', webSearchGuidance = '') {
-  const base =
-    'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. Keep visualization and dashboard tool calls bounded: prefer aggregate queries, explicit top-N limits, concrete index/data-view/table targets, and a time range when available. If a broad dashboard request fails or times out, recover with one focused read-only visualization instead of repeating the same broad call. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.';
+  const base = [
+    'You are a concise analytics assistant inside Rubberband, a custom MCP Apps host. Use selected MCP app tools when the user asks about dashboards, SQL analytics, Elasticsearch or Kibana data, Trino or Starburst warehouses, security workflows, observability, alerts, APM, Kubernetes, anomalies, import/export, or interactive previews. Keep visualization and dashboard tool calls bounded: prefer aggregate queries, explicit top-N limits, concrete index/data-view/table targets, and a time range when available. If a broad dashboard request fails or times out, recover with one focused read-only visualization instead of repeating the same broad call. After tool calls, summarize what changed, what you observed, and any required configuration. Prefer one meaningful tool call at a time, then narrate the result before drilling deeper. Once a useful final visualization, dashboard, or interactive app preview is produced, stop calling tools and provide a concise final answer.',
+    MCP_APP_ROUTING_GUIDANCE
+  ].join('\n\n');
 
   const skills = registry.getSkillGuidance(appIds);
   const domainSection = domainKnowledge
@@ -803,15 +816,59 @@ function isElasticMcpTool(tool: Record<string, unknown>) {
   return appId.includes('elastic') || appName.includes('elastic') || ['dashbuilder', 'security', 'observability'].includes(appId);
 }
 
+function isTrinoMcpTool(tool: Record<string, unknown>) {
+  const appId = String(tool.appId || '').toLowerCase();
+  const appName = String(tool.appName || '').toLowerCase();
+  return appId.includes('trino') || appName.includes('trino') || appId.includes('starburst') || appName.includes('starburst');
+}
+
+function isDataAnalyticsMcpTool(tool: Record<string, unknown>) {
+  const appId = String(tool.appId || '').toLowerCase();
+  const appName = String(tool.appName || '').toLowerCase();
+  return appId === 'data-analytics' || appId.includes('data-analytics') || appName.includes('data analytics');
+}
+
+function isDataAnalyticsToolEntry(entry: ToolMapEntry) {
+  const appId = entry.appId.toLowerCase();
+  const displayName = entry.displayName.toLowerCase();
+  return appId === 'data-analytics' || appId.includes('data-analytics') || displayName.includes('data analytics');
+}
+
+function isDataAnalyticsRendererToolName(toolName: string) {
+  return /^(validate_artifact|render_artifact|render_chart|render_table)$/i.test(toolName);
+}
+
 function buildMcpToolDescription(tool: Record<string, unknown>, ccsGuidance = '') {
   const description = [String(tool.description || `${String(tool.name || 'tool')} from ${String(tool.appId || 'app')}`)];
   if (ccsGuidance) description.push(`Elastic CCS default: ${ccsGuidance}`);
+  if (isTrinoMcpTool(tool)) {
+    description.push(
+      'Use this as a Trino / Starburst source and quick visualization tool. For polished Data Analytics artifacts, first get bounded rows and runnable SQL/provenance from this tool, then pass only reviewed compact results to a renderer app.'
+    );
+  }
+  if (isDataAnalyticsMcpTool(tool)) {
+    description.push(
+      'Use Data Analytics as a renderer/workflow layer, not as the source of truth. Only call render_chart, render_table, validate_artifact, or render_artifact after source-backed rows, metric definitions, and provenance have been obtained from selected source or knowledge tools. If rendering fails, fall back to the source app native visual or answer from reviewed rows.'
+    );
+  }
   if (isTrinoDashboardVizTool(tool)) {
     description.push(
       'For multi-panel dashboard requests, prefer one visualize_query call with panels instead of separate chart calls. Each panel can carry its own SQL, chart type, field mappings, sizing, and row limit.'
     );
   }
   return description.filter(Boolean).join('\n');
+}
+
+function buildToolFailureGuidance(entry: ToolMapEntry) {
+  if (isDataAnalyticsToolEntry(entry) && isDataAnalyticsRendererToolName(entry.toolName)) {
+    return [
+      'The Data Analytics renderer failed. Do not repeat the same renderer call with the same payload.',
+      'If the underlying data came from Trino / Starburst and a Trino visualization tool is selected, fall back to that source app for a simpler native chart/table using the same SQL/result intent.',
+      'If no native source renderer is available, answer from the reviewed source rows and include the runnable SQL/provenance, bounds, and caveats.',
+      'Do not fabricate replacement rows or metric values.'
+    ].join(' ');
+  }
+  return 'This MCP tool failed. Do not repeat the same broad call. If useful, try one narrower read-only tool call with explicit bounds such as one visualization, top-N, a concrete index/data view, or a time range; otherwise explain the limitation from available context.';
 }
 
 function isTrinoDashboardVizTool(tool: Record<string, unknown>) {
@@ -844,7 +901,11 @@ export function shouldExposeMcpToolToModel(tool: Record<string, unknown>) {
   if (!toolName || ['app_only', 'app-only', 'app.only'].includes(toolName)) return false;
 
   const meta = (tool._meta || {}) as Record<string, unknown>;
-  const visibility = Array.isArray(meta.visibility) ? meta.visibility : typeof meta.visibility === 'string' ? [meta.visibility] : [];
+  const uiMeta = isRecord(meta.ui) ? meta.ui : {};
+  const visibility = [
+    ...(Array.isArray(meta.visibility) ? meta.visibility : typeof meta.visibility === 'string' ? [meta.visibility] : []),
+    ...(Array.isArray(uiMeta.visibility) ? uiMeta.visibility : typeof uiMeta.visibility === 'string' ? [uiMeta.visibility] : [])
+  ];
   return !visibility.map(item => String(item).toLowerCase()).includes('app');
 }
 

@@ -4,7 +4,7 @@ import process from 'node:process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { InstalledMcpApp } from './types.js';
+import type { InstalledMcpApp, McpAppRole } from './types.js';
 import type { SettingsAccess } from './settings.js';
 import { applyMasterTls, fetchWithMasterTls, masterTlsEnv } from './tls.js';
 import { readElasticCcsSettings, wildcardToRegExp } from './elastic-ccs.js';
@@ -107,7 +107,13 @@ export class McpRegistry {
         app.error = undefined;
         for (const tool of app.tools) {
           if (!isMcpToolVisible({ settings: this.settings, appId: app.id, appName: app.name, toolName: String(tool.name || ''), tool })) continue;
-          tools.push({ appId: app.id, appName: app.name, ...tool });
+          tools.push({
+            ...tool,
+            appId: app.id,
+            appName: app.name,
+            ...(app.role ? { appRole: app.role } : {}),
+            ...(app.capabilities?.length ? { appCapabilities: app.capabilities } : {})
+          });
         }
       } catch (error) {
         app.status = 'error';
@@ -605,10 +611,14 @@ function parseCustomMcpServer(value: unknown): InstalledMcpApp | undefined {
   const headers = buildCustomMcpHeaders(value);
   const name = readString(value.name) || id;
   const description = readString(value.description) || `Custom Streamable HTTP MCP server at ${redactUrlForDescription(url)}`;
+  const role = readMcpAppRole(value.role) || 'knowledge';
+  const capabilities = readStringList(value.capabilities || value.tags);
   return {
     id,
     name,
     description,
+    role,
+    ...(capabilities.length ? { capabilities } : {}),
     transport: {
       type: 'http',
       url,
@@ -659,6 +669,22 @@ function validateCustomMcpUrl(url: string, id: string) {
 
 function readString(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function readStringList(value: unknown) {
+  if (Array.isArray(value)) return value.map(item => readString(item)).filter(Boolean);
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function readMcpAppRole(value: unknown): McpAppRole | undefined {
+  const role = readString(value).toLowerCase();
+  return ['source', 'renderer', 'domain', 'knowledge', 'utility'].includes(role) ? (role as McpAppRole) : undefined;
 }
 
 function sanitizeCustomMcpId(value: string) {

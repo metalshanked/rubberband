@@ -964,6 +964,7 @@ test('adds Elastic CCS defaults to Elastic MCP tool descriptions', async () => {
 test('read-only MCP policy blocks mutating tools and arguments', () => {
   assert.equal(isLikelyMutatingTool('delete_case', { description: 'Delete a case from Kibana.' }), true);
   assert.equal(isLikelyMutatingTool('create_chart', { description: 'Render a preview chart.' }), false);
+  assert.equal(isLikelyMutatingTool('export_artifact_package', { annotations: { readOnlyHint: false } }), true);
 
   assert.throws(
     () =>
@@ -997,6 +998,41 @@ test('read-only MCP policy blocks mutating tools and arguments', () => {
       tool: { name: 'create_chart', description: 'Render a chart preview.' },
       args: { query: 'from logs-* | limit 10' }
     })
+  );
+});
+
+test('system prompt includes MCP role routing and renderer fallback guidance', () => {
+  const registry = { getSkillGuidance: () => [] };
+  const prompt = buildSystemPrompt(registry as never, ['mcp-app-trino', 'data-analytics']);
+
+  assert.match(prompt, /MCP app routing/);
+  assert.match(prompt, /Trino \/ Starburst remains the execution source of truth|Trino \/ Starburst tools for SQL execution/);
+  assert.match(prompt, /Data Analytics/);
+  assert.match(prompt, /fall back to the source app native visualization/i);
+});
+
+test('model tool exposure honors nested ui visibility metadata', () => {
+  assert.equal(
+    shouldExposeMcpToolToModel({
+      name: 'internal_widget_action',
+      _meta: {
+        ui: {
+          visibility: ['app']
+        }
+      }
+    }),
+    false
+  );
+  assert.equal(
+    shouldExposeMcpToolToModel({
+      name: 'render_chart',
+      _meta: {
+        ui: {
+          visibility: ['model']
+        }
+      }
+    }),
+    true
   );
 });
 

@@ -238,18 +238,20 @@ The default `mcp-apps.json` installs:
 - `elastic/example-mcp-app-security`
 - `elastic/example-mcp-app-observability`
 - `metalshanked/mcp-app-trino`
+- `openai/role-specific-plugins/plugins/data-analytics`
 
 Licensing boundary:
 
 - Rubberband source is MIT licensed.
 - The Elastic MCP apps above are Elastic License 2.0 upstream projects.
 - The Trino visualization app above is MIT licensed upstream.
+- The OpenAI Data Analytics plugin declares MIT licensing in its plugin manifest; review upstream notices before production redistribution.
 - Rubberband's MIT license does not relicense installed MCP apps.
 
 During Docker build or `npm run mcp:install`, Rubberband:
 
 1. Reads `MCP_APPS_CONFIG`, defaulting to `mcp-apps.json`.
-2. Clones or extracts each configured app. The default config pins Git apps to commit SHAs so Docker builds do not silently float to a new upstream commit.
+2. Clones or extracts each configured app. The default config pins Git apps to commit SHAs so Docker builds do not silently float to a new upstream commit. Monorepo apps can set `source.subdirectory` so only the MCP app directory becomes the installed app root.
 3. Runs each app's configured install/build commands.
 4. Downloads and verifies configured skill packs, then extracts them under the app's `skills/` directory.
 5. Scans app skills from `skills/**/SKILL.md`.
@@ -277,7 +279,9 @@ flowchart TD
 
 Each app entry supports:
 
-- `source`: `{ "type": "git", "url": "...", "ref": "<branch-or-40-char-commit-sha>" }` or `{ "type": "zip", "path": "./vendor/app.zip" }`
+- `source`: `{ "type": "git", "url": "...", "ref": "<branch-or-40-char-commit-sha>", "subdirectory": "optional/path" }` or `{ "type": "zip", "path": "./vendor/app.zip", "subdirectory": "optional/path" }`
+- `role`: optional UI/routing role: `source`, `renderer`, `domain`, `knowledge`, or `utility`.
+- `capabilities`: optional tags used for sidebar organization and prompt routing, such as `ui`, `trino`, `renderer`, `reports`, or `semantic`.
 - `install`: command arrays run in the app directory during image build.
 - `skillPacks`: optional `.zip` skill assets to download or copy into `skills/`; each entry supports `url` or `path`, plus optional `sha256`.
 - `transport`: stdio or HTTP runtime connection details.
@@ -287,6 +291,23 @@ Each app entry supports:
 Editing `mcp-apps.json` does not vendor app source into this repository. Run `npm run mcp:install` locally, or rebuild the Docker image, to install changed apps.
 
 Docker images built from the default `Dockerfile` include installed MCP app source and build output. Treat those images as Rubberband plus bundled third-party MCP apps, not as an all-MIT distribution.
+
+## MCP App Roles And Routing
+
+Rubberband separates selected MCP apps by intent so UI apps and headless servers can be selected together without competing for the same job:
+
+- `source`: live data execution or metadata, such as Trino / Starburst.
+- `renderer`: presentation and artifact packaging, such as Data Analytics.
+- `domain`: native domain UI workflows, such as Elastic Security, Observability, or Kibana dashboard builders.
+- `knowledge`: headless context or semantic servers, such as Confluence, documentation, or semantic catalog MCP servers.
+- `utility`: supporting tools that do not fit the categories above.
+
+The normal routing pattern for Trino-heavy work is:
+
+1. Query or inspect Trino / Starburst with the source app.
+2. Use native Trino visuals for quick SQL charts or fallback rendering.
+3. Use Data Analytics only after source-backed rows and runnable SQL/provenance are available, especially for polished charts, tables, reports, dashboards, and artifact validation.
+4. If Data Analytics validation or rendering fails, Rubberband tells the model or Deep Agent to fall back to the source app native visualization or answer from reviewed rows with SQL/provenance and caveats.
 
 ## Running With Docker
 
@@ -604,6 +625,8 @@ The default Elastic Observability app pins the app source to the v1.1.1 release 
 - `manage-alerts`
 - `ml-anomalies`
 - `observe`
+
+The default Data Analytics app is installed from the `plugins/data-analytics` subdirectory of OpenAI's role-specific-plugins repository. Its bundled skills are discovered from that subdirectory and injected only when the Data Analytics app is selected for the turn.
 
 At chat time:
 

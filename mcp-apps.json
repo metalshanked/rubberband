@@ -4,6 +4,8 @@
       "id": "dashbuilder",
       "name": "Elastic Dashbuilder",
       "description": "Build, preview, import, and export Kibana dashboards with MCP Apps.",
+      "role": "domain",
+      "capabilities": ["ui", "renderer", "elastic", "kibana", "dashboard"],
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-dashbuilder.git",
@@ -40,6 +42,8 @@
       "id": "security",
       "name": "Elastic Security",
       "description": "Interactive SOC workflows for alerts, cases, rules, threat hunting, and sample ECS security data.",
+      "role": "domain",
+      "capabilities": ["ui", "elastic", "security", "workflow"],
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-security.git",
@@ -78,6 +82,8 @@
       "id": "observability",
       "name": "Elastic Observability",
       "description": "Interactive SRE workflows for observability, APM, Kubernetes, ML anomalies, and alert rules.",
+      "role": "domain",
+      "capabilities": ["ui", "elastic", "observability", "workflow"],
       "source": {
         "type": "git",
         "url": "https://github.com/elastic/example-mcp-app-observability.git",
@@ -148,6 +154,8 @@
       "id": "mcp-app-trino",
       "name": "Trino Visualization",
       "description": "Query Trino or Starburst and render MCP App visualizations or multi-panel dashboards with Elastic Charts.",
+      "role": "source",
+      "capabilities": ["ui", "source", "trino", "starburst", "sql", "visualization"],
       "source": {
         "type": "git",
         "url": "https://github.com/metalshanked/mcp-app-trino.git",
@@ -215,6 +223,28 @@
         "STARBURST_TLS_CLIENT_KEY",
         "STARBURST_TLS_CLIENT_KEY_FILE",
         "STARBURST_TLS_CLIENT_KEY_PASSPHRASE",
+        "NODE_TLS_REJECT_UNAUTHORIZED"
+      ]
+    },
+    {
+      "id": "data-analytics",
+      "name": "Data Analytics",
+      "description": "OpenAI Data Analytics skills and MCP widgets for source-backed charts, tables, reports, dashboards, and artifact validation.",
+      "role": "renderer",
+      "capabilities": ["ui", "renderer", "analytics", "skills", "reports", "dashboards", "charts", "tables"],
+      "source": {
+        "type": "git",
+        "url": "https://github.com/openai/role-specific-plugins.git",
+        "ref": "ebf5795abb95c18ee17e90bc56c83820d998eecd",
+        "subdirectory": "plugins/data-analytics"
+      },
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["./mcp/server.cjs", "--stdio"],
+        "cwd": "${appDir}"
+      },
+      "envPassthrough": [
         "NODE_TLS_REJECT_UNAUTHORIZED"
       ]
     }

@@ -56,13 +56,20 @@ type AppInfo = {
   id: string;
   name: string;
   description?: string;
+  role?: AppRole;
+  capabilities?: string[];
+  custom?: boolean;
   status: 'idle' | 'connecting' | 'connected' | 'error';
   error?: string;
 };
 
+type AppRole = 'source' | 'renderer' | 'domain' | 'knowledge' | 'utility';
+
 type McpTool = {
   appId: string;
   appName: string;
+  appRole?: AppRole;
+  appCapabilities?: string[];
   name: string;
   description?: string;
   inputSchema?: unknown;
@@ -793,6 +800,8 @@ function App() {
   const hasStoredSelectedAppIdsRef = useRef(initialSelectedAppIds !== null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const toolsByApp = useMemo(() => groupToolsByApp(tools, apps, selectedAppIds), [tools, apps, selectedAppIds]);
+  const toolsByAppId = useMemo(() => indexToolsByAppId(tools), [tools]);
+  const appGroups = useMemo(() => groupAppsForSidebar(apps, tools, selectedAppIds), [apps, tools, selectedAppIds]);
   const selectedToolCount = useMemo(() => tools.filter(tool => selectedAppIds.includes(tool.appId)).length, [tools, selectedAppIds]);
   const selectedTool = useMemo(() => (selectedToolKey ? tools.find(tool => toolKey(tool) === selectedToolKey) || null : null), [selectedToolKey, tools]);
   const progressCanExpand = progressSteps.length > 0 || progressMessage.length > 54;
@@ -1812,23 +1821,40 @@ function App() {
           </button>
           {!collapsedSections.apps && (
             <div className="appList">
-              {apps.map(app => (
-                <div className="appItem" key={app.id}>
-                  <div className="appTop">
-                    <label className="appSelect">
-                      <input
-                        type="checkbox"
-                        checked={selectedAppIds.includes(app.id)}
-                        onChange={() => toggleSelectedApp(app.id)}
-                      />
-                      <span>{app.name}</span>
-                    </label>
-                    <StatusBadge status={app.status} />
+              {appGroups.map(group => (
+                <div className="appGroup" key={group.id}>
+                  <div className="appGroupHeader">
+                    <span>{group.title}</span>
+                    <em>{group.selectedCount}/{group.apps.length}</em>
                   </div>
-                  {app.description ? <p>{app.description}</p> : null}
-                  {app.error ? <p className="errorText">{app.error}</p> : null}
+                  {group.apps.map(app => {
+                    const appTools = toolsByAppId.get(app.id) || [];
+                    return (
+                      <div className="appItem" key={app.id}>
+                        <div className="appTop">
+                          <label className="appSelect">
+                            <input
+                              type="checkbox"
+                              checked={selectedAppIds.includes(app.id)}
+                              onChange={() => toggleSelectedApp(app.id)}
+                            />
+                            <span>{app.name}</span>
+                          </label>
+                          <StatusBadge status={app.status} />
+                        </div>
+                        <div className="appMeta">
+                          <span>{formatAppRoleLabel(resolveAppRole(app, appTools))}</span>
+                          <span>{isUiCapableApp(app, appTools) ? 'UI' : 'Headless'}</span>
+                          {app.custom ? <span>Custom</span> : null}
+                        </div>
+                        {app.description ? <p>{app.description}</p> : null}
+                        {app.error ? <p className="errorText">{app.error}</p> : null}
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
+              {!apps.length ? <div className="muted">No MCP apps are visible under the current exposure policy.</div> : null}
             </div>
           )}
         </section>
@@ -4283,6 +4309,98 @@ function ErrorExplainer({ error, onDismiss }: { error: UserError; onDismiss: () 
 
 function toolKey(tool: McpTool) {
   return `${tool.appId}:${tool.name}`;
+}
+
+type SidebarAppGroup = {
+  id: string;
+  title: string;
+  apps: AppInfo[];
+  selectedCount: number;
+};
+
+const sidebarAppGroupDefs: Array<{ id: string; title: string; roles: AppRole[] }> = [
+  { id: 'sources', title: 'Data Sources', roles: ['source'] },
+  { id: 'renderers', title: 'Renderers', roles: ['renderer'] },
+  { id: 'domain', title: 'Domain UI Apps', roles: ['domain'] },
+  { id: 'knowledge', title: 'Knowledge & Context', roles: ['knowledge'] },
+  { id: 'utility', title: 'Utilities', roles: ['utility'] }
+];
+
+function indexToolsByAppId(tools: McpTool[]) {
+  return tools.reduce((groups, tool) => {
+    groups.set(tool.appId, [...(groups.get(tool.appId) || []), tool]);
+    return groups;
+  }, new Map<string, McpTool[]>());
+}
+
+function groupAppsForSidebar(apps: AppInfo[], tools: McpTool[], selectedAppIds: string[]): SidebarAppGroup[] {
+  const selected = new Set(selectedAppIds);
+  const appTools = indexToolsByAppId(tools);
+
+  const buckets = new Map(sidebarAppGroupDefs.map(def => [def.id, { ...def, apps: [] as AppInfo[] }]));
+  for (const app of apps) {
+    const role = resolveAppRole(app, appTools.get(app.id) || []);
+    const group = sidebarAppGroupDefs.find(def => def.roles.includes(role)) || sidebarAppGroupDefs.at(-1)!;
+    buckets.get(group.id)?.apps.push(app);
+  }
+
+  return sidebarAppGroupDefs
+    .map(def => {
+      const appsInGroup = [...(buckets.get(def.id)?.apps || [])].sort((a, b) => Number(selected.has(b.id)) - Number(selected.has(a.id)) || a.name.localeCompare(b.name));
+      return {
+        id: def.id,
+        title: def.title,
+        apps: appsInGroup,
+        selectedCount: appsInGroup.filter(app => selected.has(app.id)).length
+      };
+    })
+    .filter(group => group.apps.length);
+}
+
+function resolveAppRole(app: AppInfo, appTools: McpTool[] = []): AppRole {
+  if (isAppRole(app.role)) return app.role;
+  const toolRole = appTools.map(tool => tool.appRole).find(isAppRole);
+  if (toolRole) return toolRole;
+
+  const capabilities = normalizedAppCapabilities(app, appTools);
+  const haystack = `${app.id} ${app.name} ${app.description || ''} ${capabilities.join(' ')}`.toLowerCase();
+  if (haystack.includes('data-analytics') || haystack.includes('data analytics')) return 'renderer';
+  if (/\b(trino|starburst|warehouse|snowflake|bigquery|databricks)\b/.test(haystack)) return 'source';
+  if (/\b(security|observability|kibana|dashbuilder|elastic|apm|soc|alert|case)\b/.test(haystack)) return 'domain';
+  if (/\b(confluence|semantix|semantic|notion|sharepoint|google drive|gdrive|docs|github|catalog|knowledge)\b/.test(haystack)) return 'knowledge';
+  if (capabilities.includes('source')) return 'source';
+  if (capabilities.some(item => ['renderer', 'report', 'reports', 'dashboard', 'dashboards', 'chart', 'charts', 'table', 'tables'].includes(item))) return 'renderer';
+  if (capabilities.some(item => ['domain', 'workflow'].includes(item))) return 'domain';
+  if (capabilities.some(item => ['knowledge', 'docs', 'semantic'].includes(item))) return 'knowledge';
+  return isUiCapableApp(app, appTools) ? 'utility' : 'knowledge';
+}
+
+function isAppRole(value: unknown): value is AppRole {
+  return ['source', 'renderer', 'domain', 'knowledge', 'utility'].includes(String(value || ''));
+}
+
+function normalizedAppCapabilities(app: AppInfo, appTools: McpTool[] = []) {
+  return [
+    ...(app.capabilities || []),
+    ...appTools.flatMap(tool => tool.appCapabilities || [])
+  ]
+    .map(value => String(value).trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isUiCapableApp(app: AppInfo, appTools: McpTool[] = []) {
+  const capabilities = normalizedAppCapabilities(app, appTools);
+  return capabilities.includes('ui') || appTools.some(tool => Boolean(tool._meta?.ui?.resourceUri));
+}
+
+function formatAppRoleLabel(role: AppRole) {
+  return {
+    source: 'Source',
+    renderer: 'Renderer',
+    domain: 'Domain',
+    knowledge: 'Knowledge',
+    utility: 'Utility'
+  }[role];
 }
 
 function groupToolsByApp(tools: McpTool[], apps: AppInfo[], selectedAppIds: string[]) {

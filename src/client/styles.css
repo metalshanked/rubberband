@@ -319,6 +319,29 @@ input {
   font-size: 13px;
 }
 
+.appGroup {
+  display: grid;
+  gap: 7px;
+}
+
+.appGroupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 0;
+  color: #647382;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.appGroupHeader em {
+  color: #8b98a6;
+  font-style: normal;
+  letter-spacing: 0;
+}
+
 .appTop,
 .toolItem,
 .toolGroupHeader {
@@ -357,6 +380,24 @@ input {
 .appItem p {
   margin: 6px 0 0;
   line-height: 1.35;
+}
+
+.appMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.appMeta span {
+  padding: 2px 6px;
+  border: 1px solid #d9e3ec;
+  border-radius: 999px;
+  background: #f7fafc;
+  color: #607080;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .toolGroup {

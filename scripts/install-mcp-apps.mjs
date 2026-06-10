@@ -109,6 +109,27 @@ async function unpackZip(zipPath, target, stripTopLevel) {
   await fs.rename(staging, target);
 }
 
+function safeSubdirectory(value, appId) {
+  const normalized = String(value || '').trim().replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!normalized || normalized === '.') return '';
+  const parts = normalized.split('/');
+  if (parts.some(part => !part || part === '.' || part === '..')) {
+    throw new Error(`Invalid source.subdirectory for ${appId}: ${value}`);
+  }
+  return parts.join('/');
+}
+
+async function materializeSourceSubdirectory(sourceRoot, target, subdirectory, appId) {
+  const relative = safeSubdirectory(subdirectory, appId);
+  if (!relative) return;
+  const source = path.resolve(sourceRoot, relative);
+  assertInside(source, sourceRoot);
+  if (!existsSync(source)) throw new Error(`source.subdirectory for ${appId} was not found: ${relative}`);
+  await fs.rm(target, { recursive: true, force: true });
+  await fs.mkdir(target, { recursive: true });
+  await fs.cp(source, target, { recursive: true, force: true });
+}
+
 async function downloadFile(url, target) {
   const response = await fetch(url, {
     headers: {
@@ -228,22 +249,34 @@ function trimSkillContent(content) {
 
 async function installApp(app) {
   const appDir = path.resolve(installRoot, app.id);
+  const sourceSubdirectory = safeSubdirectory(app.source?.subdirectory, app.id);
+  const sourceWorkDir = sourceSubdirectory ? `${appDir}.__source` : appDir;
   assertInside(appDir, installRoot);
+  assertInside(sourceWorkDir, installRoot);
   await cleanDirectory(appDir);
+  if (sourceSubdirectory) await cleanDirectory(sourceWorkDir);
 
   if (app.source?.type === 'git') {
     const cloneArgs = ['clone', '--depth', '1'];
     if (app.source.ref && !isCommitHash(app.source.ref)) cloneArgs.push('--branch', app.source.ref);
-    cloneArgs.push(app.source.url, appDir);
+    cloneArgs.push(app.source.url, sourceWorkDir);
     await run('git', cloneArgs, { cwd: workspace });
     if (isCommitHash(app.source.ref)) {
-      await run('git', ['fetch', '--depth', '1', 'origin', app.source.ref], { cwd: appDir });
-      await run('git', ['checkout', '--detach', app.source.ref], { cwd: appDir });
+      await run('git', ['fetch', '--depth', '1', 'origin', app.source.ref], { cwd: sourceWorkDir });
+      await run('git', ['checkout', '--detach', app.source.ref], { cwd: sourceWorkDir });
+    }
+    if (sourceSubdirectory) {
+      await materializeSourceSubdirectory(sourceWorkDir, appDir, sourceSubdirectory, app.id);
+      await fs.rm(sourceWorkDir, { recursive: true, force: true });
     }
   } else if (app.source?.type === 'zip') {
     const zipPath = path.resolve(workspace, app.source.path);
     if (!existsSync(zipPath)) throw new Error(`Zip source not found for ${app.id}: ${zipPath}`);
-    await unpackZip(zipPath, appDir, app.source.stripTopLevel !== false);
+    await unpackZip(zipPath, sourceWorkDir, app.source.stripTopLevel !== false);
+    if (sourceSubdirectory) {
+      await materializeSourceSubdirectory(sourceWorkDir, appDir, sourceSubdirectory, app.id);
+      await fs.rm(sourceWorkDir, { recursive: true, force: true });
+    }
   } else {
     throw new Error(`Unsupported source type for ${app.id}: ${app.source?.type}`);
   }
@@ -264,6 +297,8 @@ async function installApp(app) {
     id: app.id,
     name: app.name || app.id,
     description: app.description || '',
+    ...(app.role ? { role: app.role } : {}),
+    ...(Array.isArray(app.capabilities) && app.capabilities.length ? { capabilities: app.capabilities } : {}),
     skills,
     transport: {
       ...app.transport,
@@ -276,7 +311,7 @@ async function installApp(app) {
 }
 
 async function main() {
-  const raw = await fs.readFile(configPath, 'utf8');
+  const raw = (await fs.readFile(configPath, 'utf8')).replace(/^\uFEFF/, '');
   const config = JSON.parse(raw);
   await fs.mkdir(installRoot, { recursive: true });
 

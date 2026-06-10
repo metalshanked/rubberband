@@ -158,6 +158,8 @@ export function assertMcpToolCallAllowed(context: ToolPolicyContext) {
 }
 
 export function isLikelyMutatingTool(toolName: string, tool?: Record<string, unknown>) {
+  if (toolAnnotationsSignalMutation(tool)) return true;
+
   const normalizedName = normalizeName(toolName);
   const description = typeof tool?.description === 'string' ? tool.description : '';
   const text = `${normalizedName}\n${description}`;
@@ -166,6 +168,14 @@ export function isLikelyMutatingTool(toolName: string, tool?: Record<string, unk
     return false;
   }
   return mutatingToolNamePattern.test(normalizedName) || stronglyMutatingDescriptionPattern.test(text);
+}
+
+function toolAnnotationsSignalMutation(tool?: Record<string, unknown>) {
+  const annotations = tool && isRecord(tool.annotations) ? tool.annotations : undefined;
+  if (!annotations) return false;
+  if (annotations.readOnlyHint === false) return true;
+  if (annotations.destructiveHint === true) return true;
+  return false;
 }
 
 function describeMcpToolAvailability(context: ToolPolicyContext): McpAppExposureDecision {
@@ -290,4 +300,8 @@ function formatToolId(context: ToolPolicyContext) {
 
 function normalizeName(value: string) {
   return value.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

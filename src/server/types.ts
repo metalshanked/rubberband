@@ -12,10 +12,14 @@ export type McpTransportConfig =
       insecureTls?: boolean;
     };
 
+export type McpAppRole = 'source' | 'renderer' | 'domain' | 'knowledge' | 'utility';
+
 export type InstalledMcpApp = {
   id: string;
   name: string;
   description?: string;
+  role?: McpAppRole;
+  capabilities?: string[];
   transport: McpTransportConfig;
   envPassthrough?: string[];
   skills?: Array<{
