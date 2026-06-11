@@ -25,7 +25,7 @@ export class SessionManager {
   private lastCleanup = 0;
 
   constructor(
-    private readonly apps: InstalledMcpApp[],
+    private apps: InstalledMcpApp[],
     private readonly settings: SettingsStore,
     private readonly ttlMs = Number(process.env.SESSION_TTL_MS || DEFAULT_TTL_MS)
   ) {}
@@ -58,6 +58,16 @@ export class SessionManager {
   async closeAll() {
     await Promise.all([...this.sessions.values()].map(session => session.registry.closeAll()));
     this.sessions.clear();
+  }
+
+  async reloadApps(apps: InstalledMcpApp[]) {
+    this.apps = apps;
+    await Promise.all(
+      [...this.sessions.values()].map(async session => {
+        await session.registry.closeAll();
+        session.registry = Registry.fromApps(this.apps, session.settings);
+      })
+    );
   }
 
   private readRequestedSessionId(req: express.Request) {

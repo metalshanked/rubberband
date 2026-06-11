@@ -215,9 +215,11 @@ async function main() {
       const session = sessions.get(req, res);
       logger.info('reloading MCP apps', { sessionId: session.id.slice(0, 8) });
       session.progress.publish('Reloading MCP apps and tools');
-      await session.registry.reconnectAll();
-      const tools = await session.registry.listTools();
-      res.json({ apps: session.registry.listApps(), tools });
+      const latestInstalledApps = await McpRegistry.loadApps(manifestPath);
+      await sessions.reloadApps(latestInstalledApps);
+      const refreshedSession = sessions.get(req, res);
+      const tools = await refreshedSession.registry.listTools();
+      res.json({ apps: refreshedSession.registry.listApps(), tools });
     } catch (error) {
       next(error);
     }
@@ -471,7 +473,7 @@ async function main() {
 
   app.use(async (error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const message = error instanceof Error ? error.message : String(error);
-    logger.error('request failed', { error: message });
+    logger.error('request failed', { error: sanitizeErrorMessage(message) });
     if (res.headersSent) return;
     const statusCode = readHttpStatus(error);
     const session = sessions.get(req, res);

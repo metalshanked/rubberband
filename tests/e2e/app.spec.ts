@@ -121,6 +121,25 @@ test('shows layman RCA and fix guidance for failed requests', async ({ page }) =
   await expect(page.getByText(/specific catalog or schema/)).toBeVisible();
 });
 
+test('shows a themed session expired modal for backend 401 responses', async ({ page }) => {
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 401,
+      contentType: 'text/html',
+      body: '<!doctype html><title>Unauthorized</title><h1>Login required</h1>'
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show data');
+  await page.getByTitle('Send').click();
+
+  const dialog = page.getByRole('dialog', { name: 'Session expired' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Rubberband received a 401 from the backend.')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Refresh page' })).toBeVisible();
+});
+
 test('dismisses failed request banners and clears them on new chat', async ({ page }) => {
   await page.route('**/api/chat', async route => {
     await route.fulfill({
@@ -556,6 +575,44 @@ test('renders embedded MCP app HTML without resource refetches', async ({ page }
   await expect(frame.getByText('Embedded preview')).toBeVisible();
   await expect(frame.frameLocator('iframe').getByText('Embedded MCP UI')).toBeVisible();
   expect(resourceReadCount).toBe(0);
+});
+
+test('clears visualization loading fallback when an MCP frame does not emit size events', async ({ page }) => {
+  const embeddedHtml = `<!doctype html>
+<html>
+  <body>
+    <main><h1>Silent MCP UI</h1><p>This app does not emit resize notifications.</p></main>
+  </body>
+</html>`;
+
+  await page.route('**/api/chat', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: 'Silent preview ready',
+        toolCalls: [
+          {
+            id: 'silent-preview-1',
+            appId: 'embedded',
+            toolName: 'show_preview',
+            toolInput: {},
+            toolResult: { content: [] },
+            html: embeddedHtml,
+            title: 'Silent preview'
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto(appPath());
+  await page.getByPlaceholder('Ask for a dashboard, SQL chart, or analytics preview...').fill('show silent preview');
+  await page.getByTitle('Send').click();
+
+  const frame = page.locator('.appFrame').first();
+  await expect(frame.frameLocator('iframe').getByText('Silent MCP UI')).toBeVisible();
+  await expect(frame.getByText('Loading visualization')).toBeHidden({ timeout: 5000 });
 });
 
 test('hides embedded preview edit controls until preview tools are shown', async ({ page }) => {

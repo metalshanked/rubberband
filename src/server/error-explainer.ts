@@ -35,9 +35,11 @@ export async function explainError(error: unknown, settings: SettingsAccess, con
 
 export function sanitizeErrorMessage(value: string) {
   return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTION}`)
-    .replace(/(?:api[_-]?key|access[_-]?token|token|password|secret|authorization)["'\s:=]+[^"',\s}]+/gi, match => {
-      const separator = match.match(/["'\s:=]+/)?.[0] || '=';
+    .replace(/API\s+key:\s+unable\s+to\s+find\s+apikey\s+with\s+id\s+[A-Za-z0-9._~+/=-]+/gi, `API key: unable to find apikey with id ${REDACTION}`)
+    .replace(/apikey\s+with\s+id\s+[A-Za-z0-9._~+/=-]+/gi, `apikey with id ${REDACTION}`)
+    .replace(/Bearer\s+(?!realm\b)[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTION}`)
+    .replace(/(?:api[_-]?key|access[_-]?token|token|password|secret|authorization)(["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, match => {
+      const separator = match.match(/["']?\s*[:=]\s*["']?/)?.[0] || '=';
       return match.split(separator)[0] + separator + REDACTION;
     })
     .replace(/https?:\/\/[^\s"',)]+/gi, url => redactUrl(url))

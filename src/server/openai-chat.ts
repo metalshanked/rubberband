@@ -119,6 +119,7 @@ const MCP_APP_ROUTING_GUIDANCE = [
   'MCP app routing:',
   '- Treat source apps such as Trino, Starburst, Elasticsearch, and domain apps as the source of truth for live data, metadata, and domain-specific workflows.',
   '- Treat renderer apps such as Data Analytics as presentation and artifact engines. Use them after source-backed data has been obtained, reviewed, bounded, and paired with provenance such as runnable SQL or source metadata.',
+  '- When calling Data Analytics renderer tools, include compact source rows and fill the artifact provenance fields with the actual source query. Its validator expects source.query.sql to contain concrete SQL-looking query text. For Elasticsearch, prefer Elasticsearch SQL SELECT provenance; if the source path is JSON DSL-only or a native Kibana workflow with no SQL-equivalent query, use the native Elastic renderer instead of forcing Data Analytics.',
   '- For Trino-heavy requests, use Trino / Starburst tools for SQL execution and simple native visuals. Use Data Analytics for polished analytical charts, tables, dashboards, reports, artifact validation, and semantic workflow guidance.',
   '- For domain workflows such as Elastic Security, Observability, Kibana dashboards, or alert/case work, prefer the native domain UI app instead of recreating the same view through a generic renderer.',
   '- Knowledge or headless MCP servers such as docs, Confluence, semantic catalogs, or code/context servers provide evidence and definitions; they do not replace source query execution or UI rendering.',
@@ -848,7 +849,7 @@ function buildMcpToolDescription(tool: Record<string, unknown>, ccsGuidance = ''
   }
   if (isDataAnalyticsMcpTool(tool)) {
     description.push(
-      'Use Data Analytics as a renderer/workflow layer, not as the source of truth. Only call render_chart, render_table, validate_artifact, or render_artifact after source-backed rows, metric definitions, and provenance have been obtained from selected source or knowledge tools. If rendering fails, fall back to the source app native visual or answer from reviewed rows.'
+      'Use Data Analytics as a renderer/workflow layer, not as the source of truth. Only call render_chart, render_table, validate_artifact, or render_artifact after source-backed rows, metric definitions, and provenance have been obtained from selected source or knowledge tools. Include compact rows and source.query.sql with concrete SQL-looking query text; for Elasticsearch, prefer Elasticsearch SQL SELECT provenance and fall back to the native Elastic renderer when the source path is JSON DSL-only. If rendering fails, fall back to the source app native visual or answer from reviewed rows.'
     );
   }
   if (isTrinoDashboardVizTool(tool)) {

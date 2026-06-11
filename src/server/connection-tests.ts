@@ -96,7 +96,7 @@ async function testElastic(settings: TestSettings) {
   const baseUrl = resolveElasticUrl(settings);
   const auth = buildElasticAuthHeader(settings);
   const response = await fetchWithMasterTls(settings, `${baseUrl}/`, {
-    signal: AbortSignal.timeout(readOptionalIntegerSetting(settings, 'ELASTIC_PROFILER_TIMEOUT_MS') || 8_000),
+    signal: AbortSignal.timeout(readElasticRequestTimeoutMs(settings)),
     headers: auth ? { authorization: auth } : undefined
   });
   if (!response.ok) throw new Error(`Elasticsearch request failed (${response.status}): ${await response.text()}`);
@@ -109,6 +109,10 @@ async function testElastic(settings: TestSettings) {
       ...(body.version?.number ? { version: body.version.number } : {})
     }
   };
+}
+
+function readElasticRequestTimeoutMs(settings: TestSettings) {
+  return readOptionalIntegerSetting(settings, 'ELASTIC_QUERY_TIMEOUT_MS') || readOptionalIntegerSetting(settings, 'ELASTIC_PROFILER_TIMEOUT_MS') || 300_000;
 }
 
 async function testKibana(settings: TestSettings) {

@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { SettingsAccess } from './settings.js';
 import { buildElasticProfile, renderElasticProfile, type ElasticProfile } from './elastic-profiler.js';
 import { buildTrinoProfile, renderTrinoProfile, type TrinoProfile } from './trino-profiler.js';
+import { sanitizeErrorMessage } from './error-explainer.js';
 import { logger } from './logger.js';
 
 export type AnalyticsProfileTarget = 'elastic' | 'trino';
@@ -78,7 +79,7 @@ export class AnalyticsProfileService {
 
     this.runningPromise = this.runProfiles(reason)
       .catch(error => {
-        logger.error('analytics profiler run failed', { error: error instanceof Error ? error.message : String(error) });
+        logger.error('analytics profiler run failed', { error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) });
       })
       .finally(() => {
         this.saveToDisk();
@@ -170,7 +171,7 @@ export class AnalyticsProfileService {
     } catch (error) {
       entry.status = entry.profile ? 'stale' : 'error';
       entry.lastCompletedAt = new Date().toISOString();
-      entry.error = error instanceof Error ? error.message : String(error);
+      entry.error = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
       logger.warn('analytics profiler target failed', { target, error: entry.error });
     }
   }
@@ -199,7 +200,7 @@ export class AnalyticsProfileService {
       this.markStaleIfNeeded(this.trino);
       logger.info('loaded analytics profile snapshot', { storagePath: this.storagePath });
     } catch (error) {
-      logger.warn('failed to load analytics profile snapshot', { error: error instanceof Error ? error.message : String(error) });
+      logger.warn('failed to load analytics profile snapshot', { error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) });
     }
   }
 
@@ -209,7 +210,7 @@ export class AnalyticsProfileService {
       fs.mkdirSync(path.dirname(this.storagePath), { recursive: true });
       fs.writeFileSync(this.storagePath, JSON.stringify(this.snapshot(), null, 2));
     } catch (error) {
-      logger.warn('failed to save analytics profile snapshot', { error: error instanceof Error ? error.message : String(error) });
+      logger.warn('failed to save analytics profile snapshot', { error: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)) });
     }
   }
 

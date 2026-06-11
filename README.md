@@ -429,6 +429,8 @@ Use the `ELASTICSEARCH_*` names consistently; legacy `ES_*` names are not read a
 
 Use `TRINO_*` names for `mcp-app-trino`; `STARBURST_*` names are also passed through for compatible Trino apps.
 
+Timeout settings have two scopes. Rubberband-owned profilers, connection tests, autocomplete helpers, and host-side read-only probes use the Rubberband settings below. Third-party source MCP apps run in their own processes; Rubberband passes relevant environment variables to them, but an app must implement support for those variables before they affect that app's internal network calls.
+
 ## Key Environment Variables
 
 ### Server
@@ -505,6 +507,7 @@ Supported custom auth forms include `authorization`, `apiKey` with `authType`, `
 - `ELASTIC_CCS_SEARCH_BY_DEFAULT`: when `true`, Rubberband tells the model and background Elastic profiler to use configured cross-cluster search targets by default.
 - `ELASTIC_CCS_INDEX_PATTERNS`: comma- or newline-separated CCS targets. Use `cluster:index-*` for explicit targets; alias-only patterns such as `remote-prod*` are normalized to `remote-prod*:*`.
 - `ELASTIC_CCS_RESOLVE_TIMEOUT_MS`: bounded `_remote/info` and `_resolve/cluster` preflight timeout, defaults to `5000`.
+- `ELASTIC_QUERY_TIMEOUT_MS`: shared Rubberband Elasticsearch request timeout, defaults to `300000` five minutes. It is used by Rubberband's Elastic connection test, Elastic profiler/search/focus paths, and host-side CCS field/index helper calls. Rubberband also passes this value to Elastic MCP app child processes as `ELASTIC_QUERY_TIMEOUT_MS`, `ELASTIC_REQUEST_TIMEOUT_MS`, `ELASTICSEARCH_REQUEST_TIMEOUT_MS`, and `ES_REQUEST_TIMEOUT_MS` compatibility aliases.
 - `CLUSTERS_JSON`: optional Elastic MCP cluster config override. If blank, Rubberband auto-generates the single-cluster JSON required by Elastic Security from `ELASTICSEARCH_URL`, `KIBANA_URL`, `KIBANA_SPACE_ID`, and `ELASTICSEARCH_API_KEY`.
 - `CLUSTERS_FILE`: optional path to the same cluster config JSON. If set, Elastic Security prefers this over `CLUSTERS_JSON`.
 - `KIBANA_URL`
@@ -520,7 +523,7 @@ Elastic profiler controls:
 - `ELASTIC_PROFILER_MAX_INDICES`
 - `ELASTIC_PROFILER_MAX_FIELD_CAPS`
 - `ELASTIC_PROFILER_MAX_FIELDS_PER_INDEX`
-- `ELASTIC_PROFILER_TIMEOUT_MS`
+- `ELASTIC_PROFILER_TIMEOUT_MS`: legacy profiler request timeout fallback, defaults to `8000`. `ELASTIC_QUERY_TIMEOUT_MS` takes precedence for Rubberband-owned Elastic requests.
 - `ELASTIC_PROFILER_INCLUDED_PATTERNS`
 - `ELASTIC_PROFILER_EXCLUDED_PATTERNS`
 - `ELASTIC_PROFILER_INCLUDE_DATA_STREAMS`
@@ -566,11 +569,13 @@ Trino profiler controls:
 - `TRINO_PROFILER_EXCLUDED_CATALOGS`
 - `TRINO_PROFILER_CONCURRENCY`
 - `TRINO_PROFILER_CACHE_TTL_MS`
-- `TRINO_PROFILER_TIMEOUT_MS`
-- `TRINO_PROFILER_STATEMENT_TIMEOUT_MS`
-- `TRINO_PROFILER_MAX_PAGES_PER_STATEMENT`
+- `TRINO_PROFILER_TIMEOUT_MS`: per-page HTTP timeout for Rubberband-owned Trino/Starburst profiler and read-only probe requests, defaults to `12000`.
+- `TRINO_PROFILER_STATEMENT_TIMEOUT_MS`: total statement budget for Rubberband-owned Trino/Starburst profiler and read-only probe pagination, defaults to `60000`.
+- `TRINO_PROFILER_MAX_PAGES_PER_STATEMENT`: maximum Trino result pages Rubberband will follow for one profiler/probe statement, defaults to `80`.
 
 The default Trino profiler cache TTL is one day.
+
+These Trino timeout settings cover Rubberband's host-side Trino profiler, focused evidence, auto-probes, catalog-map path, and connection test. They do not control arbitrary SQL execution inside a selected Trino visualization MCP app unless that app implements and reads matching timeout environment variables.
 
 For large estates, prefer a catalog whitelist:
 
@@ -759,6 +764,18 @@ TRINO_PROFILER_MAX_PAGES_PER_STATEMENT=40
 ```
 
 The profiler is backgrounded, but it should still be bounded enough to avoid tying up metadata services.
+
+### Elastic or Trino requests time out
+
+Use the timeout that matches the request owner:
+
+- `ELASTIC_QUERY_TIMEOUT_MS`: Rubberband-owned Elasticsearch requests and compatibility env passed to Elastic child MCP apps, default `300000`.
+- `ELASTIC_CCS_RESOLVE_TIMEOUT_MS`: fast CCS metadata preflight and autocomplete resolution, default `5000`.
+- `TRINO_PROFILER_TIMEOUT_MS`: Rubberband-owned Trino/Starburst per-page request timeout, default `12000`.
+- `TRINO_PROFILER_STATEMENT_TIMEOUT_MS`: Rubberband-owned Trino/Starburst total statement budget, default `60000`.
+- `TRINO_PROFILER_MAX_PAGES_PER_STATEMENT`: Rubberband-owned Trino/Starburst pagination bound, default `80`.
+
+If the timeout happens inside a selected third-party MCP app's own query tool, Rubberband can pass environment variables but cannot force that app's internal client timeout unless the app supports it. Keep Rubberband code changes separate from `mcp_apps/*` source when you want to preserve upstream app code.
 
 ### Elastic profiler returns 403
 

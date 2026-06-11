@@ -441,7 +441,11 @@ export class McpRegistry {
       ES_CLOUD_ID: this.settings?.get('ELASTICSEARCH_CLOUD_ID') || process.env.ELASTICSEARCH_CLOUD_ID || '',
       ES_USERNAME: this.settings?.get('ELASTICSEARCH_USERNAME') || process.env.ELASTICSEARCH_USERNAME || '',
       ES_PASSWORD: this.settings?.get('ELASTICSEARCH_PASSWORD') || process.env.ELASTICSEARCH_PASSWORD || '',
-      ES_API_KEY: elasticApiKey || this.settings?.get('ELASTICSEARCH_API_KEY') || process.env.ELASTICSEARCH_API_KEY || ''
+      ES_API_KEY: elasticApiKey || this.settings?.get('ELASTICSEARCH_API_KEY') || process.env.ELASTICSEARCH_API_KEY || '',
+      ELASTIC_QUERY_TIMEOUT_MS: this.settings?.get('ELASTIC_QUERY_TIMEOUT_MS') || process.env.ELASTIC_QUERY_TIMEOUT_MS || '',
+      ELASTIC_REQUEST_TIMEOUT_MS: this.settings?.get('ELASTIC_QUERY_TIMEOUT_MS') || process.env.ELASTIC_QUERY_TIMEOUT_MS || process.env.ELASTIC_REQUEST_TIMEOUT_MS || '',
+      ELASTICSEARCH_REQUEST_TIMEOUT_MS: this.settings?.get('ELASTIC_QUERY_TIMEOUT_MS') || process.env.ELASTIC_QUERY_TIMEOUT_MS || process.env.ELASTICSEARCH_REQUEST_TIMEOUT_MS || '',
+      ES_REQUEST_TIMEOUT_MS: this.settings?.get('ELASTIC_QUERY_TIMEOUT_MS') || process.env.ELASTIC_QUERY_TIMEOUT_MS || process.env.ES_REQUEST_TIMEOUT_MS || ''
     };
 
     for (const [key, value] of Object.entries(aliases)) {
@@ -982,6 +986,8 @@ function buildElasticAuthHeader(settings: MinimalSettings, elasticApiKey?: strin
 }
 
 function readTimeoutMs(settings: MinimalSettings) {
-  const value = Number(settings.get?.('ELASTIC_PROFILER_TIMEOUT_MS') || '');
-  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 8000;
+  const queryValue = Number(settings.get?.('ELASTIC_QUERY_TIMEOUT_MS') || '');
+  if (Number.isFinite(queryValue) && queryValue > 0) return Math.trunc(queryValue);
+  const profilerValue = Number(settings.get?.('ELASTIC_PROFILER_TIMEOUT_MS') || '');
+  return Number.isFinite(profilerValue) && profilerValue > 0 ? Math.trunc(profilerValue) : 300_000;
 }

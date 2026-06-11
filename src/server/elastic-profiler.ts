@@ -34,6 +34,8 @@ export type ElasticFocusTarget = {
   docs?: number;
   health?: string;
   backingIndices?: number;
+  cluster?: string;
+  suggestion?: 'index' | 'data_stream' | 'cross_cluster_prefix' | 'cross_cluster_index' | 'cross_cluster_pattern';
 };
 
 type CatIndex = {
@@ -58,6 +60,14 @@ type RemoteInfoResponse = Record<string, {
   skip_unavailable?: boolean;
   mode?: string;
 }>;
+
+type RemoteClusterAlias = {
+  alias: string;
+  connected?: boolean;
+  skipUnavailable?: boolean;
+  mode?: string;
+  source: 'remote_info' | 'configured' | 'query';
+};
 
 type ResolveClusterResponse = {
   clusters?: Record<string, {
@@ -285,6 +295,12 @@ export async function searchElasticFocusTargets(settings: SettingsAccess, query:
   if (!normalized) return { targets: [] as ElasticFocusTarget[] };
   const boundedLimit = clampNumber(limit, 1, 200, 50);
   const client = createElasticClient(settings);
+  if (normalized.includes(':')) {
+    const targets = await searchCrossClusterFocusTargets(client, settings, normalized, boundedLimit);
+    return {
+      targets: dedupeFocusTargets(targets).slice(0, boundedLimit)
+    };
+  }
   const [indices, dataStreams] = await Promise.all([
     client.get<CatIndex[]>('/_cat/indices?format=json&h=index,docs.count,health,status&s=index').catch(() => []),
     client.get<DataStreamListing>('/_data_stream?expand_wildcards=open,hidden').catch(() => ({ data_streams: [] }))
@@ -296,7 +312,8 @@ export async function searchElasticFocusTargets(settings: SettingsAccess, query:
         name: String(item.index || ''),
         kind: 'index' as const,
         docs: Number(item['docs.count'] || 0),
-        health: item.health
+        health: item.health,
+        suggestion: 'index' as const
       }))
       .filter(item => item.name && matcher(item.name)),
     ...(dataStreams.data_streams || [])
@@ -304,13 +321,11 @@ export async function searchElasticFocusTargets(settings: SettingsAccess, query:
         name: String(stream.name || ''),
         kind: 'data_stream' as const,
         health: stream.status,
-        backingIndices: stream.indices?.length || 0
+        backingIndices: stream.indices?.length || 0,
+        suggestion: 'data_stream' as const
       }))
       .filter(item => item.name && matcher(item.name))
   ];
-  if (normalized.includes(':')) {
-    targets.unshift({ name: normalized, kind: 'cross_cluster' });
-  }
   return {
     targets: dedupeFocusTargets(targets).slice(0, boundedLimit)
   };
@@ -497,7 +512,7 @@ function createElasticClient(settings: SettingsAccess) {
   if (!baseUrl) throw new Error('Set ELASTICSEARCH_URL before running Elastic instance analysis.');
   const authHeader = buildElasticAuthHeader(settings);
   if (!authHeader) throw new Error('Set ELASTICSEARCH_API_KEY or Elasticsearch username/password before running Elastic instance analysis.');
-  const requestTimeoutMs = readSettingNumber(settings, 'ELASTIC_PROFILER_TIMEOUT_MS', 8000);
+  const requestTimeoutMs = readElasticRequestTimeoutMs(settings);
 
   return {
     async get<T>(path: string, timeoutMs = requestTimeoutMs): Promise<T> {
@@ -539,6 +554,10 @@ async function requestElastic<T>(
   }
 }
 
+function readElasticRequestTimeoutMs(settings: SettingsAccess) {
+  return readSettingNumber(settings, 'ELASTIC_QUERY_TIMEOUT_MS', readSettingNumber(settings, 'ELASTIC_PROFILER_TIMEOUT_MS', 300_000));
+}
+
 function buildElasticAuthHeader(settings: Pick<SettingsAccess, 'get'>) {
   const apiKey = settings.get('ELASTICSEARCH_API_KEY');
   if (apiKey) return apiKey.toLowerCase().startsWith('apikey ') ? apiKey : `ApiKey ${apiKey}`;
@@ -566,6 +585,172 @@ function dedupeFocusTargets(targets: ElasticFocusTarget[]) {
     seen.add(key);
     return true;
   });
+}
+
+async function searchCrossClusterFocusTargets(
+  client: ReturnType<typeof createElasticClient>,
+  settings: SettingsAccess,
+  query: string,
+  limit: number
+) {
+  const ccsSettings = readElasticCcsSettings(settings);
+  const aliases = await discoverRemoteClusterAliases(client, ccsSettings);
+  const parts = splitCrossClusterFocusQuery(query);
+  if (!parts.cluster) return suggestCrossClusterPrefixes(aliases, limit);
+
+  const matches = selectMatchingRemoteAliases(aliases, parts.cluster);
+  const candidateAliases = matches.length ? matches : [{ alias: parts.cluster, source: 'query' as const }];
+  const boundedAliases = candidateAliases.slice(0, Math.min(limit, 12));
+  const resolved = await Promise.all(
+    boundedAliases.map(async alias => {
+      const pattern = buildCrossClusterIndexPattern(alias.alias, parts.indices);
+      const indices = await listCrossClusterFocusIndices(client, pattern, ccsSettings.resolveTimeoutMs).catch(() => []);
+      return { alias, pattern, indices };
+    })
+  );
+  const targets: ElasticFocusTarget[] = [];
+
+  for (const item of resolved) {
+    const indices = item.indices
+      .map(index => normalizeCrossClusterIndexName(item.alias.alias, index))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    if (!indices.length) {
+      targets.push(buildCrossClusterPatternFocusTarget(item.alias, item.pattern));
+    } else {
+      for (const index of indices) {
+        targets.push({
+          name: index,
+          kind: 'cross_cluster',
+          cluster: splitCrossClusterTarget(index)?.cluster || item.alias.alias,
+          health: 'remote_index',
+          suggestion: 'cross_cluster_index'
+        });
+        if (targets.length >= limit) break;
+      }
+    }
+    if (targets.length >= limit) break;
+  }
+
+  return targets;
+}
+
+async function discoverRemoteClusterAliases(client: ReturnType<typeof createElasticClient>, ccsSettings: ElasticCcsSettings) {
+  const remoteAliases = await listRemoteClusterAliases(client, ccsSettings.resolveTimeoutMs).catch(() => [] as RemoteClusterAlias[]);
+  return mergeRemoteClusterAliases([...remoteAliases, ...configuredRemoteClusterAliases(ccsSettings)]);
+}
+
+async function listRemoteClusterAliases(client: ReturnType<typeof createElasticClient>, timeoutMs: number) {
+  const remoteInfo = await client.get<RemoteInfoResponse>('/_remote/info', timeoutMs);
+  return Object.entries(remoteInfo)
+    .filter(([alias, value]) => alias && value.connected !== false)
+    .map(([alias, value]) => ({
+      alias,
+      connected: value.connected,
+      skipUnavailable: value.skip_unavailable,
+      mode: value.mode,
+      source: 'remote_info' as const
+    }))
+    .sort((a, b) => a.alias.localeCompare(b.alias));
+}
+
+function configuredRemoteClusterAliases(ccsSettings: ElasticCcsSettings) {
+  return dedupeStrings(
+    ccsSettings.targets
+      .map(target => splitCrossClusterTarget(target)?.cluster || '')
+      .filter(Boolean)
+  ).map(alias => ({
+    alias,
+    source: 'configured' as const
+  }));
+}
+
+function mergeRemoteClusterAliases(aliases: RemoteClusterAlias[]) {
+  const seen = new Set<string>();
+  const merged: RemoteClusterAlias[] = [];
+  for (const alias of aliases) {
+    const value = alias.alias.trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ ...alias, alias: value });
+  }
+  return merged;
+}
+
+function splitCrossClusterFocusQuery(query: string) {
+  const separator = query.indexOf(':');
+  return {
+    cluster: separator === -1 ? query.trim() : query.slice(0, separator).trim(),
+    indices: separator === -1 ? '' : query.slice(separator + 1).trim()
+  };
+}
+
+function suggestCrossClusterPrefixes(aliases: RemoteClusterAlias[], limit: number): ElasticFocusTarget[] {
+  return aliases.slice(0, limit).map(alias => ({
+    name: `${alias.alias}:*`,
+    kind: 'cross_cluster' as const,
+    cluster: alias.alias,
+    health: remoteClusterAliasStatus(alias),
+    suggestion: 'cross_cluster_prefix' as const
+  }));
+}
+
+function selectMatchingRemoteAliases(aliases: RemoteClusterAlias[], clusterQuery: string) {
+  const query = clusterQuery.trim();
+  if (!query) return aliases;
+  const queryLower = query.toLowerCase();
+  const queryMatcher = hasWildcard(query) ? wildcardToRegExp(query, true) : undefined;
+  return aliases.filter(alias => {
+    const value = alias.alias;
+    const valueLower = value.toLowerCase();
+    if (queryMatcher?.test(value)) return true;
+    if (hasWildcard(value) && wildcardToRegExp(value, true).test(query)) return true;
+    return valueLower.startsWith(queryLower);
+  });
+}
+
+function buildCrossClusterIndexPattern(cluster: string, indexQuery: string) {
+  const index = indexQuery.trim();
+  if (!index) return `${cluster}:*`;
+  if (hasWildcard(index)) return `${cluster}:${index}`;
+  return `${cluster}:${index}*`;
+}
+
+async function listCrossClusterFocusIndices(client: ReturnType<typeof createElasticClient>, pattern: string, timeoutMs: number) {
+  const response = await client.get<{ indices?: string[] }>(
+    `/${encodeURIComponent(pattern)}/_field_caps?fields=_id&ignore_unavailable=true&allow_no_indices=true&filter_path=indices`,
+    timeoutMs
+  );
+  return dedupeStrings((response.indices || []).map(index => String(index || '')).filter(Boolean));
+}
+
+function buildCrossClusterPatternFocusTarget(alias: RemoteClusterAlias, pattern: string): ElasticFocusTarget {
+  return {
+    name: pattern,
+    kind: 'cross_cluster',
+    cluster: alias.alias,
+    health: alias.source === 'query' ? 'pattern' : remoteClusterAliasStatus(alias),
+    suggestion: alias.source === 'query' ? 'cross_cluster_pattern' : 'cross_cluster_prefix'
+  };
+}
+
+function normalizeCrossClusterIndexName(cluster: string, index: string) {
+  const value = index.trim();
+  if (!value) return '';
+  return value.includes(':') ? value : `${cluster}:${value}`;
+}
+
+function remoteClusterAliasStatus(alias: RemoteClusterAlias) {
+  if (alias.source === 'configured') return 'configured';
+  if (alias.source === 'query') return 'pattern';
+  if (alias.mode) return `remote:${alias.mode}`;
+  return 'remote';
+}
+
+function hasWildcard(value: string) {
+  return /[*?]/.test(value);
 }
 
 async function resolveCrossClusterTargets(client: ReturnType<typeof createElasticClient>, ccsSettings: ElasticCcsSettings): Promise<ElasticCrossClusterResolution> {

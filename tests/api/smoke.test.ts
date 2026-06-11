@@ -22,7 +22,7 @@ import {
 } from '../../src/server/openai-chat.js';
 import { applyElasticCcsDefaultArgs, buildElasticClustersJson, fieldCapsToFieldList, getCcsFieldsWithFieldCaps, McpRegistry, parseCustomMcpServers, withKibanaSpace } from '../../src/server/mcp-registry.js';
 import { SettingsStore } from '../../src/server/settings.js';
-import { buildElasticProfile, buildFocusedElasticEvidence, runElasticReadOnlySearch } from '../../src/server/elastic-profiler.js';
+import { buildElasticProfile, buildFocusedElasticEvidence, runElasticReadOnlySearch, searchElasticFocusTargets } from '../../src/server/elastic-profiler.js';
 import { buildElasticCcsPromptGuidance, normalizeElasticCcsTargets } from '../../src/server/elastic-ccs.js';
 import { buildFocusedTrinoEvidence, buildTrinoAutoProbes, buildTrinoProfile, runTrinoReadOnlyProbe } from '../../src/server/trino-profiler.js';
 import { explainError, sanitizeErrorMessage } from '../../src/server/error-explainer.js';
@@ -178,13 +178,16 @@ test('settings endpoint exposes optional LLM tuning fields', async () => {
 test('settings endpoint exposes Elastic CCS controls', async () => {
   const response = await fetch(`${baseUrl}/api/settings`);
   assert.equal(response.status, 200);
-  const body = (await response.json()) as { fields: Array<{ key: string; type: string; group: string }> };
+  const body = (await response.json()) as { fields: Array<{ key: string; type: string; group: string; defaultValue: string }> };
   const fields = new Map(body.fields.map(field => [field.key, field]));
 
   assert.equal(fields.get('ELASTIC_CCS_SEARCH_BY_DEFAULT')?.type, 'checkbox');
   assert.equal(fields.get('ELASTIC_CCS_SEARCH_BY_DEFAULT')?.group, 'elastic');
   assert.equal(fields.get('ELASTIC_CCS_INDEX_PATTERNS')?.type, 'textarea');
   assert.equal(fields.get('ELASTIC_CCS_RESOLVE_TIMEOUT_MS')?.type, 'text');
+  assert.equal(fields.get('ELASTIC_QUERY_TIMEOUT_MS')?.type, 'text');
+  assert.equal(fields.get('ELASTIC_QUERY_TIMEOUT_MS')?.group, 'elastic');
+  assert.equal(fields.get('ELASTIC_QUERY_TIMEOUT_MS')?.defaultValue, '300000');
 });
 
 test('settings endpoint exposes read-only MCP safety controls', async () => {
@@ -701,6 +704,10 @@ test('sanitizes and explains timeout failures without leaking sensitive values',
   assert.doesNotMatch(sanitized, /abcdefghijklmnopqrstuvwxyz/);
   assert.doesNotMatch(sanitized, /supersecret/);
   assert.doesNotMatch(sanitized, /\/v1\/statement/);
+  const elastic401 = sanitizeErrorMessage('Elasticsearch request failed (401): API key: unable to find apikey with id flRHZp4B3uj_CsIxy6iX');
+  assert.doesNotMatch(elastic401, /flRHZp4B3uj_CsIxy6iX/);
+  assert.match(elastic401, /apikey with id \[redacted\]/i);
+  assert.match(elastic401, /\[redacted\]/);
 
   const settings = {
     get: () => '',
@@ -1008,6 +1015,7 @@ test('system prompt includes MCP role routing and renderer fallback guidance', (
   assert.match(prompt, /MCP app routing/);
   assert.match(prompt, /Trino \/ Starburst remains the execution source of truth|Trino \/ Starburst tools for SQL execution/);
   assert.match(prompt, /Data Analytics/);
+  assert.match(prompt, /source\.query\.sql/);
   assert.match(prompt, /fall back to the source app native visualization/i);
 });
 
@@ -2134,6 +2142,86 @@ test('bounded Elastic profiler includes resolved CCS targets by default', async 
     assert.doesNotMatch(requestedUrls.join('\n'), /\/_data_stream/);
     assert.match(requestedUrls.join('\n'), /\/_resolve\/cluster\/remote-prod:\*,analytics-remote:logs-\*/);
     assert.match(requestedUrls.join('\n'), /\/remote-prod:\*\/_field_caps/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Elastic focus search suggests connected CCS prefixes for colon query', async () => {
+  const previousFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    requestedUrls.push(decodeURIComponent(url));
+    if (url.includes('/_remote/info')) {
+      return new Response(
+        JSON.stringify({
+          'remote-prod': { connected: true, mode: 'proxy' },
+          'remote-dev': { connected: true, mode: 'sniff' },
+          'remote-offline': { connected: false }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await searchElasticFocusTargets(
+      mapSettings({
+        ELASTICSEARCH_URL: 'http://elastic.test',
+        ELASTICSEARCH_API_KEY: 'encoded-key'
+      }) as never,
+      ':',
+      10
+    );
+
+    assert.deepEqual(result.targets.map(target => target.name), ['remote-dev:*', 'remote-prod:*']);
+    assert.deepEqual(result.targets.map(target => target.suggestion), ['cross_cluster_prefix', 'cross_cluster_prefix']);
+    assert.equal(result.targets[0].kind, 'cross_cluster');
+    assert.doesNotMatch(requestedUrls.join('\n'), /\/_cat\/indices|\/_data_stream|\/_field_caps/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Elastic focus search resolves CCS indices after remote prefix', async () => {
+  const previousFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    requestedUrls.push(decodeURIComponent(url));
+    if (url.includes('/_remote/info')) {
+      return new Response(JSON.stringify({ 'remote-prod': { connected: true } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    if (url.includes('/_field_caps')) {
+      return new Response(
+        JSON.stringify({
+          indices: ['remote-prod:logs-2026.06.10', 'logs-2026.06.09']
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await searchElasticFocusTargets(
+      mapSettings({
+        ELASTICSEARCH_URL: 'http://elastic.test',
+        ELASTICSEARCH_API_KEY: 'encoded-key'
+      }) as never,
+      'remote-prod:',
+      10
+    );
+
+    assert.deepEqual(result.targets.map(target => target.name), ['remote-prod:logs-2026.06.09', 'remote-prod:logs-2026.06.10']);
+    assert.deepEqual(result.targets.map(target => target.suggestion), ['cross_cluster_index', 'cross_cluster_index']);
+    assert.match(requestedUrls.join('\n'), /\/remote-prod:\*\/_field_caps/);
+    assert.doesNotMatch(requestedUrls.join('\n'), /\/_cat\/indices|\/_data_stream/);
   } finally {
     globalThis.fetch = previousFetch;
   }

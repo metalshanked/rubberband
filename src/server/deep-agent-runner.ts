@@ -33,6 +33,7 @@ const MCP_APP_ROUTING_GUIDANCE = [
   'Selected MCP app routing:',
   '- Use source apps such as Trino, Starburst, Elasticsearch, and domain apps for live data, metadata, and source-specific workflows.',
   '- Use renderer apps such as Data Analytics only after source-backed evidence is collected and bounded.',
+  '- When Data Analytics renders charts, tables, reports, or dashboards, pass compact source rows plus artifact provenance. The plugin validator expects source.query.sql to contain concrete SQL-looking query text. For Elasticsearch, prefer Elasticsearch SQL SELECT provenance and use the native Elastic renderer when the source path is JSON DSL-only.',
   '- For Trino-heavy analysis, Trino / Starburst remains the execution source of truth; Data Analytics can package reviewed rows into polished charts, tables, reports, or dashboards.',
   '- If Data Analytics rendering fails, fall back to the source app native visualization when available, otherwise continue from reviewed rows with provenance and caveats.'
 ].join('\n');
@@ -576,7 +577,7 @@ function buildSelectedMcpRoutingHint(rawTool: Record<string, unknown>) {
   const appName = String(rawTool.appName || '').toLowerCase();
   const haystack = `${appId} ${appName}`;
   if (haystack.includes('data-analytics') || appName.includes('data analytics')) {
-    return 'Data Analytics is a renderer/workflow layer. Use it only after source-backed rows and provenance have been collected from selected source tools.';
+    return 'Data Analytics is a renderer/workflow layer. Use it only after source-backed rows and provenance have been collected from selected source tools. Renderer payloads must include compact rows and source.query.sql with concrete SQL-looking query text; for Elasticsearch prefer Elasticsearch SQL SELECT provenance and use the native Elastic renderer when the source path is JSON DSL-only.';
   }
   if (haystack.includes('trino') || haystack.includes('starburst')) {
     return 'Trino / Starburst is the source and execution layer for warehouse data. Use it for SQL execution and quick native visuals.';

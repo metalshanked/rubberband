@@ -408,6 +408,8 @@ type ElasticFocusSearchResponse = {
     docs?: number;
     health?: string;
     backingIndices?: number;
+    cluster?: string;
+    suggestion?: 'index' | 'data_stream' | 'cross_cluster_prefix' | 'cross_cluster_index' | 'cross_cluster_pattern';
   }>;
 };
 
@@ -485,6 +487,8 @@ const MAX_PROGRESS_DETAIL_ITEMS = 8;
 const MAX_PROGRESS_DETAIL_CHARS = 700;
 const MAX_PROGRESS_DETAIL_VALUE_CHARS = 280;
 const FOCUS_PAGE_SIZE = 50;
+const SESSION_EXPIRED_EVENT = 'rubberband:session-expired';
+const PREVIEW_READY_FALLBACK_MS = 3200;
 
 function formatDemoIntroMessage(result: DemoResponse) {
   const appNames = result.sanity?.demoApps?.length ? `${result.sanity.demoApps.length} selected MCP app${result.sanity.demoApps.length === 1 ? '' : 's'}` : 'the selected MCP apps';
@@ -766,6 +770,8 @@ function App() {
   const [historyStorageNotice, setHistoryStorageNotice] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({ history: true, apps: false, tools: true });
+  const [collapsedAppGroupIds, setCollapsedAppGroupIds] = useState<Record<string, boolean>>({});
+  const [expandedAppDetailIds, setExpandedAppDetailIds] = useState<Record<string, boolean>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsSnapshot>({ fields: [] });
   const [settingsValues, setSettingsValues] = useState<Record<string, string>>({});
@@ -785,6 +791,7 @@ function App() {
   const [demoRunning, setDemoRunning] = useState(false);
   const [autoReportRunning, setAutoReportRunning] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [progressMessage, setProgressMessage] = useState('Starting request');
   const [progressSteps, setProgressSteps] = useState<ProgressTimelineStep[]>([]);
   const [progressExpanded, setProgressExpanded] = useState(false);
@@ -821,6 +828,24 @@ function App() {
     setProgressMessage(message);
     setProgressSteps(current => appendProgressStep(current, createLocalProgressStep(message)));
   }
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      activeRequestRef.current?.abort();
+      setBusy(false);
+      setToolRunning(false);
+      setSettingsSaving(false);
+      setAnalyticsProfileLoading(false);
+      setAnalyticsProfileRefreshing(false);
+      setTestingConnection(null);
+      setRefreshingApps(false);
+      setDemoRunning(false);
+      setAutoReportRunning(false);
+      setSessionExpired(true);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1403,6 +1428,14 @@ function App() {
     setCollapsedSections(current => ({ ...current, [section]: !current[section] }));
   }
 
+  function toggleAppGroup(groupId: string) {
+    setCollapsedAppGroupIds(current => ({ ...current, [groupId]: !current[groupId] }));
+  }
+
+  function toggleAppDetails(appId: string) {
+    setExpandedAppDetailIds(current => ({ ...current, [appId]: !current[appId] }));
+  }
+
   function selectToolForTest(tool: McpTool) {
     setExpandedToolAppIds(current => (current.includes(tool.appId) ? current : [...current, tool.appId]));
     setSelectedToolKey(toolKey(tool));
@@ -1750,8 +1783,13 @@ function App() {
   }
 
   const visibleMessages = messages.filter(message => !message.hidden);
+  const refreshExpiredSession = () => {
+    rememberPageRefreshDraft(draft);
+    window.location.reload();
+  };
 
   return (
+    <>
     <div className={`shell ${sidebarCollapsed ? 'navCollapsed' : ''}`} style={{ '--chat-scale': chatScale } as React.CSSProperties}>
       <aside className="sidebar">
         <div className="brand">
@@ -1823,35 +1861,53 @@ function App() {
             <div className="appList">
               {appGroups.map(group => (
                 <div className="appGroup" key={group.id}>
-                  <div className="appGroupHeader">
-                    <span>{group.title}</span>
+                  <button className="appGroupHeader" type="button" onClick={() => toggleAppGroup(group.id)} aria-expanded={!collapsedAppGroupIds[group.id]}>
+                    <span>
+                      {collapsedAppGroupIds[group.id] ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {group.title}
+                    </span>
                     <em>{group.selectedCount}/{group.apps.length}</em>
-                  </div>
-                  {group.apps.map(app => {
-                    const appTools = toolsByAppId.get(app.id) || [];
-                    return (
-                      <div className="appItem" key={app.id}>
-                        <div className="appTop">
-                          <label className="appSelect">
-                            <input
-                              type="checkbox"
-                              checked={selectedAppIds.includes(app.id)}
-                              onChange={() => toggleSelectedApp(app.id)}
-                            />
-                            <span>{app.name}</span>
-                          </label>
-                          <StatusBadge status={app.status} />
-                        </div>
-                        <div className="appMeta">
-                          <span>{formatAppRoleLabel(resolveAppRole(app, appTools))}</span>
-                          <span>{isUiCapableApp(app, appTools) ? 'UI' : 'Headless'}</span>
-                          {app.custom ? <span>Custom</span> : null}
-                        </div>
-                        {app.description ? <p>{app.description}</p> : null}
-                        {app.error ? <p className="errorText">{app.error}</p> : null}
-                      </div>
-                    );
-                  })}
+                  </button>
+                  {!collapsedAppGroupIds[group.id] ? (
+                    <div className="appGroupBody">
+                      {group.apps.map(app => {
+                        const appTools = toolsByAppId.get(app.id) || [];
+                        const hasAppDetails = Boolean(app.description || app.error);
+                        const detailsExpanded = Boolean(expandedAppDetailIds[app.id]);
+                        return (
+                          <div className="appItem" key={app.id}>
+                            <div className="appTop">
+                              <label className="appSelect">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedAppIds.includes(app.id)}
+                                  onChange={() => toggleSelectedApp(app.id)}
+                                />
+                                <span>{app.name}</span>
+                              </label>
+                              <StatusBadge status={app.status} />
+                            </div>
+                            <div className="appMeta">
+                              <span>{formatAppRoleLabel(resolveAppRole(app, appTools))}</span>
+                              <span>{isUiCapableApp(app, appTools) ? 'UI' : 'Headless'}</span>
+                              {app.custom ? <span>Custom</span> : null}
+                              {hasAppDetails ? (
+                                <button className="appDetailsToggle" type="button" onClick={() => toggleAppDetails(app.id)} aria-expanded={detailsExpanded}>
+                                  {detailsExpanded ? 'Hide' : 'Details'}
+                                </button>
+                              ) : null}
+                            </div>
+                            {detailsExpanded ? (
+                              <div className="appDetails">
+                                {app.description ? <p>{app.description}</p> : null}
+                                {app.error ? <p className="errorText">{app.error}</p> : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               ))}
               {!apps.length ? <div className="muted">No MCP apps are visible under the current exposure policy.</div> : null}
@@ -2191,6 +2247,31 @@ function App() {
         />
       ) : null}
     </div>
+    {sessionExpired ? <SessionExpiredModal onRefresh={refreshExpiredSession} /> : null}
+    </>
+  );
+}
+
+function SessionExpiredModal({ onRefresh }: { onRefresh: () => void }) {
+  return (
+    <div className="sessionExpiredOverlay" role="dialog" aria-modal="true" aria-labelledby="session-expired-title">
+      <section className="sessionExpiredModal">
+        <div className="sessionExpiredIcon" aria-hidden="true">
+          <KeyRound size={22} />
+        </div>
+        <div>
+          <p className="sessionExpiredKicker">Authentication required</p>
+          <h2 id="session-expired-title">Session expired</h2>
+          <p>
+            Rubberband received a 401 from the backend. Your ingress session likely expired or needs a fresh login.
+          </p>
+        </div>
+        <button type="button" className="primaryButton sessionExpiredRefresh" onClick={onRefresh}>
+          <RefreshCw size={15} />
+          <span>Refresh page</span>
+        </button>
+      </section>
+    </div>
   );
 }
 
@@ -2373,15 +2454,18 @@ function FocusMenu({
 
   function addElasticPattern() {
     const pattern = elasticQuery.trim();
-    if (!pattern) return;
+    if (!isUsableElasticFocusPattern(pattern)) return;
     onAddTarget({
       id: crypto.randomUUID(),
       source: 'elastic',
       indexPattern: pattern,
-      kind: /[*?]/.test(pattern) ? 'index_pattern' : 'index',
+      kind: pattern.includes(':') ? 'cross_cluster' : /[*?]/.test(pattern) ? 'index_pattern' : 'index',
       label: pattern
     });
   }
+
+  const elasticPattern = elasticQuery.trim();
+  const canUseElasticPattern = isUsableElasticFocusPattern(elasticPattern);
 
   return (
     <div className="focusMenu" ref={rootRef}>
@@ -2482,30 +2566,33 @@ function FocusMenu({
                       void searchElastic();
                     }
                   }}
-                  placeholder="Index or pattern"
+                  placeholder="Index, pattern, or remote:"
                   aria-label="Elastic index search"
                 />
                 <button type="button" onClick={() => void searchElastic()} disabled={loading === 'elastic' || !elasticQuery.trim()} title="Search indices" aria-label="Search indices">
                   {loading === 'elastic' ? <Loader2 className="spin" size={14} /> : <Search size={14} />}
                 </button>
               </div>
-              {!elasticQuery.trim() ? <div className="focusHint">Type 2+ chars, a wildcard, or an exact index pattern.</div> : null}
+              {!elasticQuery.trim() ? <div className="focusHint">Type 2+ chars, <code>:</code> for remote clusters, or <code>cluster:</code> for remote indices.</div> : null}
               <div className="focusResultList">
-                {elasticQuery.trim() ? (
-                  <button type="button" className="focusPatternResult" onClick={addElasticPattern} title={`Use ${elasticQuery.trim()} as an Elastic target`}>
+                {canUseElasticPattern ? (
+                  <button type="button" className="focusPatternResult" onClick={addElasticPattern} title={`Use ${elasticPattern} as an Elastic target`}>
                     <Target size={14} />
                     <span>
                       <strong>Use pattern</strong>
-                      <small>{elasticQuery.trim()}</small>
+                      <small>{elasticPattern}</small>
                     </span>
-                    <em>{/[*?]/.test(elasticQuery.trim()) ? 'pattern' : 'exact'}</em>
+                    <em>{formatElasticPatternKind(elasticPattern)}</em>
                   </button>
                 ) : null}
                 {elasticResults.map(result => (
                   <button type="button" key={`${result.kind}:${result.name}`} onClick={() => addElasticTarget(result)} title={`Add ${result.name}`}>
-                    <Database size={14} />
-                    <span>{result.name}</span>
-                    <em>{result.kind}</em>
+                    {result.kind === 'cross_cluster' ? <GitBranch size={14} /> : <Database size={14} />}
+                    <span>
+                      <strong>{result.name}</strong>
+                      {result.kind === 'cross_cluster' ? <small>{formatElasticCcsResultSubtext(result)}</small> : null}
+                    </span>
+                    <em>{formatElasticResultKind(result)}</em>
                   </button>
                 ))}
               </div>
@@ -3259,6 +3346,7 @@ function McpAppFrame({
   const sizeChangeTimeoutRef = useRef<number | null>(null);
   const previewPanRef = useRef<{ pointerId: number; startX: number; startY: number; viewX: number; viewY: number } | null>(null);
   const vizExportMenuRef = useRef<HTMLDivElement>(null);
+  const previewStageRef = useRef<HTMLDivElement>(null);
   const proxy = useMemo(
     () =>
       createBrowserMcpProxy(toolCall.appId, update => {
@@ -3335,6 +3423,28 @@ function McpAppFrame({
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [vizExportMenuOpen]);
+
+  useEffect(() => {
+    if (catalogMapResult || previewReady) return undefined;
+    const markReady = () => setPreviewReady(true);
+    let attachedIframe: HTMLIFrameElement | null = null;
+    const attachIframeLoadHandler = () => {
+      const iframe = previewStageRef.current?.querySelector('iframe') || null;
+      if (!iframe || iframe === attachedIframe) return;
+      if (attachedIframe) attachedIframe.removeEventListener('load', markReady);
+      attachedIframe = iframe;
+      iframe.addEventListener('load', markReady, { once: true });
+    };
+    attachIframeLoadHandler();
+    const observer = new MutationObserver(attachIframeLoadHandler);
+    if (previewStageRef.current) observer.observe(previewStageRef.current, { childList: true, subtree: true });
+    const fallback = window.setTimeout(markReady, PREVIEW_READY_FALLBACK_MS);
+    return () => {
+      window.clearTimeout(fallback);
+      observer.disconnect();
+      attachedIframe?.removeEventListener('load', markReady);
+    };
+  }, [catalogMapResult, previewReady, toolCall.id, toolCall.previewRevision, showVizHelpers]);
 
   const handleSizeChanged = useCallback((params: unknown) => {
     setPreviewReady(true);
@@ -3588,6 +3698,7 @@ function McpAppFrame({
               </div>
             ) : null}
             <div
+              ref={previewStageRef}
               className="previewStage"
               style={{ transform: `translate(${previewView.x}px, ${previewView.y}px) scale(${previewView.scale})` }}
             >
@@ -4596,6 +4707,32 @@ function focusTargetKey(target: FocusTarget) {
 function formatTrinoFocusLabel(catalog: string, schema: string, table: string, tableType?: string) {
   const source = [catalog || '*', schema || '*', table || '*'].join('.');
   return tableType ? `${source} (${tableType})` : source;
+}
+
+function isUsableElasticFocusPattern(pattern: string) {
+  if (!pattern) return false;
+  const separator = pattern.indexOf(':');
+  return separator !== 0;
+}
+
+function formatElasticPatternKind(pattern: string) {
+  if (pattern.includes(':')) return 'ccs';
+  return /[*?]/.test(pattern) ? 'pattern' : 'exact';
+}
+
+function formatElasticResultKind(result: ElasticFocusSearchResponse['targets'][number]) {
+  if (result.suggestion === 'cross_cluster_prefix') return 'cluster';
+  if (result.suggestion === 'cross_cluster_index') return 'ccs index';
+  if (result.suggestion === 'cross_cluster_pattern' || result.kind === 'cross_cluster') return 'ccs';
+  return result.kind;
+}
+
+function formatElasticCcsResultSubtext(result: ElasticFocusSearchResponse['targets'][number]) {
+  const cluster = result.cluster ? `Cluster ${result.cluster}` : 'Cross-cluster search';
+  if (result.suggestion === 'cross_cluster_prefix') return `${cluster} prefix`;
+  if (result.suggestion === 'cross_cluster_index') return `${cluster} index`;
+  if (result.health) return `${cluster} (${result.health})`;
+  return cluster;
 }
 
 function mergeUniqueStrings(current: string[], next: string[]) {
@@ -5743,10 +5880,33 @@ async function api<T>(url: string, init: RequestInit = {}): Promise<T> {
   const sessionId = response.headers.get('x-rubberband-session-id');
   if (sessionId) browserSessionId = sessionId;
   if (!response.ok) {
-    const body = await response.json().catch(() => undefined);
+    const body = await readApiErrorBody(response);
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+      throw new RubberbandApiError(
+        body?.error || 'Session expired. Refresh the page to re-authenticate.',
+        body?.technicalError || `${response.status} ${response.statusText}`,
+        body?.explanation
+      );
+    }
     throw new RubberbandApiError(body?.error || `${response.status} ${response.statusText}`, body?.technicalError, body?.explanation);
   }
   return response.json() as Promise<T>;
+}
+
+type ApiErrorBody = {
+  error?: string;
+  technicalError?: string;
+  explanation?: ErrorExplanation;
+};
+
+async function readApiErrorBody(response: Response): Promise<ApiErrorBody | undefined> {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.toLowerCase().includes('application/json')) {
+    return response.json().catch(() => undefined) as Promise<ApiErrorBody | undefined>;
+  }
+  const text = await response.text().catch(() => '');
+  return text ? { error: text.slice(0, 500) } : undefined;
 }
 
 function appUrl(url: string) {
